@@ -301,7 +301,7 @@ func (p *rangeProver) preprocess() ([]*math.Zr, []*math.Zr, *math.Zr, *RangeProo
 
 	array := common.GetG1Array([]*math.G1{C, D, p.Commitment})
 	// compute challenges y and z
-	bytesToHash, err := array.Bytes()
+	bytesToHash, err := array.RawBytes()
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
@@ -356,7 +356,7 @@ func (p *rangeProver) preprocess() ([]*math.Zr, []*math.Zr, *math.Zr, *RangeProo
 
 	// compute challenge x
 	array = common.GetG1Array([]*math.G1{T1, T2})
-	bytesToHash, err = array.Bytes()
+	bytesToHash, err = array.RawBytes()
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
@@ -458,7 +458,7 @@ func (v *rangeVerifier) Verify(rp *RangeProof) error {
 		return errors.New("invalid range proof: nil elements")
 	}
 	array := common.GetG1Array([]*math.G1{rp.Data.T1, rp.Data.T2})
-	bytesToHash, err := array.Bytes()
+	bytesToHash, err := array.RawBytes()
 	if err != nil {
 		return err
 	}
@@ -468,7 +468,7 @@ func (v *rangeVerifier) Verify(rp *RangeProof) error {
 
 	// compute y and z
 	array = common.GetG1Array([]*math.G1{rp.Data.C, rp.Data.D, v.Commitment})
-	bytesToHash, err = array.Bytes()
+	bytesToHash, err = array.RawBytes()
 	if err != nil {
 		return err
 	}

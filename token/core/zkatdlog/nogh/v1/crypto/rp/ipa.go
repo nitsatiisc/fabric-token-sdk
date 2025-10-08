@@ -140,18 +140,14 @@ func NewIPAProver(
 // Prove returns an IPA proof if no error occurs, else, it returns an error
 func (p *ipaProver) Prove() (*IPA, error) {
 	array := common.GetG1Array(p.RightGenerators, p.LeftGenerators, []*mathlib.G1{p.Q, p.Commitment})
-	bytesToHash := make([][]byte, 3)
+	bytesToHash := make([][]byte, 2)
 	var err error
-	bytesToHash[0], err = array.Bytes()
+	bytesToHash[0], err = array.RawBytes()
 	if err != nil {
 		return nil, err
 	}
-	bytesToHash[1] = []byte(common.Separator)
-	bytesToHash[2] = p.InnerProduct.Bytes()
-	raw, err := asn1.MarshalStd(bytesToHash)
-	if err != nil {
-		return nil, err
-	}
+	bytesToHash[1] = p.InnerProduct.Bytes()
+	raw := append(bytesToHash[0], bytesToHash[1]...)
 	// compute first challenge
 	x := p.Curve.HashToZr(raw)
 	// compute a commitment to inner product value and the vectors
@@ -198,7 +194,7 @@ func (p *ipaProver) reduce(X, com *mathlib.G1) (*mathlib.Zr, *mathlib.Zr, []*mat
 
 		// compute this round's challenge x
 		array := common.GetG1Array([]*mathlib.G1{LArray[i], RArray[i]})
-		bytesToHash, err := array.Bytes()
+		bytesToHash, err := array.RawBytes()
 		if err != nil {
 			return nil, nil, nil, nil, err
 		}
@@ -280,18 +276,14 @@ func (v *ipaVerifier) Verify(proof *IPA) error {
 	}
 	// compute the first challenge x
 	array := common.GetG1Array(v.RightGenerators, v.LeftGenerators, []*mathlib.G1{v.Q, v.Commitment})
-	bytesToHash := make([][]byte, 3)
+	bytesToHash := make([][]byte, 2)
 	var err error
-	bytesToHash[0], err = array.Bytes()
+	bytesToHash[0], err = array.RawBytes()
 	if err != nil {
 		return err
 	}
-	bytesToHash[1] = []byte(common.Separator)
-	bytesToHash[2] = v.InnerProduct.Bytes()
-	raw, err := asn1.MarshalStd(bytesToHash)
-	if err != nil {
-		return err
-	}
+	bytesToHash[1] = v.InnerProduct.Bytes()
+	raw := append(bytesToHash[0], bytesToHash[1]...)
 	x := v.Curve.HashToZr(raw)
 	// C is commitment to leftVector, rightVector and their inner product
 	C := v.Q.Mul(v.Curve.ModMul(x, v.InnerProduct, v.Curve.GroupOrder))
@@ -310,7 +302,7 @@ func (v *ipaVerifier) Verify(proof *IPA) error {
 		}
 		// compute the challenge x for each round of reduction
 		array = common.GetG1Array([]*mathlib.G1{proof.L[i], proof.R[i]})
-		raw, err = array.Bytes()
+		raw, err = array.RawBytes()
 		if err != nil {
 			return err
 		}

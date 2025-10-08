@@ -35,6 +35,23 @@ func (a *G1Array) Bytes() ([]byte, error) {
 	return bytes.Join(raw, []byte(Separator)), nil
 }
 
+// The function is added to compute hash of G1 vector with pure byte representation.
+// This is intended to be used to compute Fiat-Shamir challenges, and so we need a
+// method which is easily portable to other environments such as Solidity, Rust etc.
+// For serialization/deserializaton of proofs, we should use Bytes(), while this function
+// should be used for computing RO queries.
+func (a *G1Array) RawBytes() ([]byte, error) {
+	raw := make([][]byte, len([]*math.G1(*a)))
+	for i, e := range []*math.G1(*a) {
+		if e == nil {
+			return nil, errors.Errorf("failed to marshal array of G1")
+		}
+		raw[i] = e.Bytes()
+	}
+	// join the serialization of the group elements
+	return bytes.Join(raw, nil), nil
+}
+
 // GetG1Array takes a series of G1 elements and returns the corresponding array
 func GetG1Array(elements ...[]*math.G1) *G1Array {
 	var array []*math.G1
