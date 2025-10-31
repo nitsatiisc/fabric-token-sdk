@@ -9,12 +9,17 @@ package rp_test
 import (
 	"context"
 	"fmt"
-	"github.com/ethereum/go-ethereum"
-	"github.com/hyperledger-labs/fabric-token-sdk/token/core/zkatdlog/nogh/v1/crypto/evmzcat"
+
 	"math/big"
 	"strconv"
 	"testing"
 	"time"
+
+	"github.com/ethereum/go-ethereum"
+	"github.com/hyperledger-labs/fabric-token-sdk/token/core/zkatdlog/nogh/v1/crypto/common"
+
+	//"github.com/hyperledger-labs/fabric-token-sdk/token/core/zkatdlog/nogh/v1/crypto/evmzcat"
+	evmzcat "github.com/nitsatiisc/zkatsolidity"
 
 	math "github.com/IBM/mathlib"
 	"github.com/hyperledger-labs/fabric-token-sdk/token/core/zkatdlog/nogh/v1/crypto/rp"
@@ -85,26 +90,26 @@ func TestIPAProofVerifySolidity(t *testing.T) {
 
 	verifiersol := evmzcat.ZKATVerifierIPAVerifier{
 		InnerProduct:    new(big.Int).SetBytes(verifier.InnerProduct.Bytes()),
-		Q:               evmzcat.MakeZKATPoint(verifier.Q),
-		LeftGenerators:  evmzcat.MakeZKATPoints(verifier.LeftGenerators),
-		RightGenerators: evmzcat.MakeZKATPoints(verifier.RightGenerators),
-		Commitment:      evmzcat.MakeZKATPoint(verifier.Commitment),
+		Q:               common.MakeZKATPoint(verifier.Q),
+		LeftGenerators:  common.MakeZKATPoints(verifier.LeftGenerators),
+		RightGenerators: common.MakeZKATPoints(verifier.RightGenerators),
+		Commitment:      common.MakeZKATPoint(verifier.Commitment),
 		Rounds:          new(big.Int).SetUint64(verifier.NumberOfRounds),
 	}
 
 	proofsol := evmzcat.ZKATVerifierIPAProof{
 		Left:  new(big.Int).SetBytes(proof.Left.Bytes()),
 		Right: new(big.Int).SetBytes(proof.Right.Bytes()),
-		L:     evmzcat.MakeZKATPoints(proof.L),
-		R:     evmzcat.MakeZKATPoints(proof.R),
+		L:     common.MakeZKATPoints(proof.L),
+		R:     common.MakeZKATPoints(proof.R),
 	}
 
-	abi, err := evmzcat.EvmzcatMetaData.GetAbi()
+	abi, err := evmzcat.IdemixevmMetaData.GetAbi()
 	assert.NoError(t, err)
 	input, err := abi.Pack("verifyIPA", verifiersol, proofsol)
 	assert.NoError(t, err)
 
-	backend, _, addr, auth, err := evmzcat.CreateInstance()
+	backend, _, addr, auth, err := common.CreateInstance()
 	assert.NoError(t, err)
 
 	// Prepare call message

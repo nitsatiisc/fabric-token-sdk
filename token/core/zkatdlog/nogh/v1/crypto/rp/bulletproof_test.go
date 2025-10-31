@@ -9,15 +9,17 @@ package rp_test
 import (
 	"context"
 	"fmt"
-	"github.com/ethereum/go-ethereum"
-	"github.com/hyperledger-labs/fabric-token-sdk/token/core/zkatdlog/nogh/v1/crypto/evmzcat"
 	"math/big"
 	"strconv"
 	"testing"
 	"time"
 
+	"github.com/ethereum/go-ethereum"
+	"github.com/hyperledger-labs/fabric-token-sdk/token/core/zkatdlog/nogh/v1/crypto/common"
+	//"github.com/hyperledger-labs/fabric-token-sdk/token/core/zkatdlog/nogh/v1/crypto/evmzcat"
 	math "github.com/IBM/mathlib"
 	"github.com/hyperledger-labs/fabric-token-sdk/token/core/zkatdlog/nogh/v1/crypto/rp"
+	evmzcat "github.com/nitsatiisc/zkatsolidity"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -84,38 +86,41 @@ func TestBFProofVerifySolidity(t *testing.T) {
 	assert.NoError(t, err)
 
 	verifiersol := evmzcat.ZKATVerifierRangeVerifier{
-		ComV:            evmzcat.MakeZKATPoint(verifier.Commitment),
-		G:               evmzcat.MakeZKATPoint(verifier.CommitmentGenerators[0]),
-		H:               evmzcat.MakeZKATPoint(verifier.CommitmentGenerators[1]),
-		LeftGenerators:  evmzcat.MakeZKATPoints(verifier.LeftGenerators),
-		RightGenerators: evmzcat.MakeZKATPoints(verifier.RightGenerators),
-		P:               evmzcat.MakeZKATPoint(verifier.P),
-		Q:               evmzcat.MakeZKATPoint(verifier.Q),
+		ComV:            common.MakeZKATPoint(verifier.Commitment),
+		G:               common.MakeZKATPoint(verifier.CommitmentGenerators[0]),
+		H:               common.MakeZKATPoint(verifier.CommitmentGenerators[1]),
+		LeftGenerators:  common.MakeZKATPoints(verifier.LeftGenerators),
+		RightGenerators: common.MakeZKATPoints(verifier.RightGenerators),
+		P:               common.MakeZKATPoint(verifier.P),
+		Q:               common.MakeZKATPoint(verifier.Q),
 		Rounds:          new(big.Int).SetUint64(verifier.NumberOfRounds),
 		Nr:              new(big.Int).SetUint64(verifier.BitLength),
 	}
 
+	fmt.Println("V.Commitment = ", verifier.Commitment.String())
+	fmt.Println("ComV = ", verifiersol.ComV)
+
 	proofsol := evmzcat.ZKATVerifierRangeProof{
-		C:            evmzcat.MakeZKATPoint(proof.Data.C),
-		D:            evmzcat.MakeZKATPoint(proof.Data.D),
-		T1:           evmzcat.MakeZKATPoint(proof.Data.T1),
-		T2:           evmzcat.MakeZKATPoint(proof.Data.T2),
+		C:            common.MakeZKATPoint(proof.Data.C),
+		D:            common.MakeZKATPoint(proof.Data.D),
+		T1:           common.MakeZKATPoint(proof.Data.T1),
+		T2:           common.MakeZKATPoint(proof.Data.T2),
 		Tau:          new(big.Int).SetBytes(proof.Data.Tau.Bytes()),
 		Delta:        new(big.Int).SetBytes(proof.Data.Delta.Bytes()),
 		InnerProduct: new(big.Int).SetBytes(proof.Data.InnerProduct.Bytes()),
 		IpaProof: evmzcat.ZKATVerifierIPAProof{
 			Left:  new(big.Int).SetBytes(proof.IPA.Left.Bytes()),
 			Right: new(big.Int).SetBytes(proof.IPA.Right.Bytes()),
-			L:     evmzcat.MakeZKATPoints(proof.IPA.L),
-			R:     evmzcat.MakeZKATPoints(proof.IPA.R),
+			L:     common.MakeZKATPoints(proof.IPA.L),
+			R:     common.MakeZKATPoints(proof.IPA.R),
 		},
 	}
 
-	abi, err := evmzcat.EvmzcatMetaData.GetAbi()
+	abi, err := evmzcat.IdemixevmMetaData.GetAbi()
 	assert.NoError(t, err)
 	input, err := abi.Pack("verifyRange", verifiersol, proofsol)
 	assert.NoError(t, err)
-	backend, _, addr, auth, err := evmzcat.CreateInstance()
+	backend, _, addr, auth, err := common.CreateInstance()
 	assert.NoError(t, err)
 	// Prepare call message
 	msg := ethereum.CallMsg{
