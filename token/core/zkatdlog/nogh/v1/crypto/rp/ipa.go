@@ -385,10 +385,14 @@ func innerProduct(left []*mathlib.Zr, right []*mathlib.Zr, c *mathlib.Curve) *ma
 }
 
 func commitVector(left []*mathlib.Zr, right []*mathlib.Zr, leftgen []*mathlib.G1, rightgen []*mathlib.G1, c *mathlib.Curve) *mathlib.G1 {
-	com := c.NewG1()
-	for i := range left {
-		com.Add(leftgen[i].Mul(left[i]))
-		com.Add(rightgen[i].Mul(right[i]))
-	}
+	points := make([]*mathlib.G1, len(leftgen)+len(rightgen))
+	copy(points, leftgen)
+	copy(points[len(leftgen):], rightgen)
+
+	scalars := make([]*mathlib.Zr, len(left)+len(right))
+	copy(scalars, left)
+	copy(scalars[len(left):], right)
+
+	com := c.MultiScalarMult(points, scalars)
 	return com
 }
