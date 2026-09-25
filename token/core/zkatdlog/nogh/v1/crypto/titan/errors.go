@@ -100,4 +100,10 @@ var (
 	// ErrInsufficientGenerators indicates that fewer Pedersen generators were
 	// supplied than the row length of the matrix form of the polynomial.
 	ErrInsufficientGenerators = errors.New("not enough generators to commit a row")
+
+	// ErrPointAtInfinity indicates that the point at infinity was supplied where
+	// a non-identity point is required. Crossing into mathlib for the CSP linear
+	// form, an identity generator would collapse the commitment scheme, and CSP
+	// rejects it; this reports it at the boundary instead.
+	ErrPointAtInfinity = errors.New("point at infinity is not a valid group element here")
 )

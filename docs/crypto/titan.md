@@ -17,7 +17,8 @@
 9. [Performance Notes](#9-performance-notes)
 10. [Porting Notes: Rust/Pasta to Go/BLS12-381](#10-porting-notes-rustpasta-to-gobls12-381)
 11. [Testing](#11-testing)
-12. [References](#12-references)
+12. [Evaluation](#12-evaluation)
+13. [References](#13-references)
 
 ---
 
@@ -375,6 +376,9 @@ if err != nil {
 | `ProveGroupEval(curve, f, alpha, ell)` | `sumcheck.GroupPoly`, point, split | proof, opening, `sigma` | the evaluation claim `f(alpha)` |
 | `VerifyGroupEval(curve, proof, alpha, sigma, ell)` | proof + public data | opening | checking that claim |
 | `DefaultSplit(m)` | `m` | `m/2` | the cost-optimal split point |
+| `NewGenerators(curve, gens)` | `[]bls12381.G1Affine` | `*Generators` | the converted-once generator cache for `Eval` |
+| `Eval` / `VerifyEval` | see [section 12.10](#1210-api) | `*EvalProof` | the field evaluation proof `f(alpha) = sigma` |
+| `EvalGroup` / `VerifyEvalGroup` | see [section 12.10](#1210-api) | `*GroupEvalProof` | the group evaluation proof |
 
 Both encoders take the polynomial types from
 [`crypto/sumcheck`](../../token/core/zkatdlog/nogh/v1/crypto/sumcheck) rather than
@@ -451,6 +455,9 @@ the shape against what it expects rather than trusting the prover's.
 `gens` comes from the caller: `CommitField` performs no trusted setup, and generator
 provenance is a separate question this package does not answer. At least `cols`
 generators are required (`ErrInsufficientGenerators`).
+
+Committing is not opening: `Commitment` plus `OpenLeaf` is binding and queryable by
+*position*, and proving `f(alpha) = sigma` is [section 12](#12-evaluation).
 
 `VerifyMerkleProof` returns a `bool`, not an `error`, because every failure is the
 same verdict — this proof does not open this root — and distinguishing malformed
@@ -633,8 +640,11 @@ so the Go verifier must be written from the paper rather than ported.
 | `commit_test.go` | `CommitGroup` round-trip; leaves are a partition of the codeword in order; tier 1 against a direct per-row MSM; the group poly *is* the evaluation table; odd-`m` matrix shape table; determinism; distinct polys and distinct generators ⇒ distinct roots; validation for `CommitGroup`, `CommitField`, `OpenLeaf`; `numVarsOf` |
 | `merkle_fuzz_test.go` | `FuzzVerifyMerkleProof`: never panics, never accepts |
 | `merkle_bench_test.go` | `BuildTree` at `2^8..2^14`; 1/10/100 openings; verify at two depths; `CommitField` at `m ∈ {10,12,14}` |
+| `bridge_test.go` | scalar-field order equality pinned as a regression test; G1 round-trip (generator, scalar multiple, negated); infinity rejected; the offending index named on slice conversion; `Zr` round-trip over `0,1,2,255,256,65535,2^40,r-1` and random; add and mul agreeing across the boundary; all four BLS12-381 curve variants preserving the caller's ID; validation; `padTo32` |
+| `eval_test.go` | round-trip for `m ∈ 2..12` asserting *both* acceptance and `sigma == EvaluatePoint(alpha)`; `sigmaPartial` computed two independent ways; leg independence by grafting legs across two commitments; negatives (wrong `sigma`, tampered `sigmaPartial`, tampered row leg, tampered column leg, reversed `alpha`, a proof for another polynomial); `Generators` round-trip, nil receiver, short prefix, infinity, and cross-curve misuse; `EvalAffine` agreeing with the cached path; `checkShape` including the row-count ambiguity; `foldRows` against a direct restriction; group `EvalGroup` round-trip and negatives; leg-2 transcript separator distinctness and rejection of a foreign-header CSP proof; validation |
+| `eval_bench_test.go` | `Eval` and `VerifyEval` at `m ∈ {8,10,12,14}`; `EvalGroup` at `m ∈ {8,10,12}`; the mathlib boundary for generators and scalars at `n ∈ {16,64,128,256}`; cached vs uncached across prove/verify |
 
-Statement coverage is **93.4%** overall, race-clean.
+Statement coverage is **92.6%** overall, race-clean.
 
 Three tests carry most of the weight:
 
@@ -787,7 +797,293 @@ go test ./token/core/zkatdlog/nogh/v1/crypto/titan/ -race
 go test ./token/core/zkatdlog/nogh/v1/crypto/titan/ -run='^$' -bench=. -benchtime=3x
 ```
 
-## 12. References
+## 12. Evaluation
+
+Sections 6-11 give a commitment that is binding and queryable *by position*. They do
+not prove `f(alpha) = sigma`. `Eval` closes that, and it is what makes this a
+polynomial commitment scheme rather than a vector commitment with extra structure.
+
+### 12.1 Two legs, and why neither is optional
+
+`alpha` splits across the matrix of [section 7.1](#71-tier-1-rows-to-a-group-multilinear).
+The proof has two legs, joined at a single group element:
+
+    sigmaPartial = G(alphaRow)                       // a group element
+
+    leg 1 (alphaRow):  group sum-check on G, asserting the sum sigmaPartial
+    leg 2 (alphaCol):  CSP linear form, proving the folded row vector opens
+                       to sigma under the commitment sigmaPartial
+
+Each leg alone is worthless:
+
+- **Leg 1 alone** shows `sigmaPartial` is consistent with the committed oracle, but
+  says nothing about `alphaCol` and so nothing about `sigma`.
+- **Leg 2 alone** proves an evaluation under a commitment that nobody has tied to the
+  commitment the verifier holds. A prover would be free to invent `sigmaPartial`.
+
+`sigmaPartial` is the **only** element both legs touch, and therefore the only thing
+binding them. `TestEvalLegIndependence` grafts a valid leg from one polynomial's proof
+onto another's and requires rejection — that is the test that catches "the two legs
+are not actually tied together", which is the subtle way a two-leg proof goes unsound.
+
+### 12.2 Why one element can be both an evaluation and a commitment
+
+This is the pivot of the construction, and it is worth stating explicitly because it
+looks like a coincidence and is not.
+
+Tier 1 set `G_j = MSM(gens, row_j)`. Taking the `eq(alphaRow, .)` combination of the
+rows therefore **commutes** with the MSM:
+
+    sigmaPartial = sum_j eq_j * MSM(gens, row_j)
+                 = MSM(gens, sum_j eq_j * row_j)
+                 = MSM(gens, a)            where a = fold(rows, alphaRow)
+
+Read left to right it is `G(alphaRow)`, an *evaluation* of the group multilinear —
+which is what leg 1 proves. Read right to left it is the Pedersen *commitment* to the
+folded row vector `a` — which is what leg 2 opens. One group element, two readings,
+and the proof is sound precisely because they coincide.
+
+**Linearity of the MSM in the message is the entire reason.** Any row commitment that
+is not linear in the message breaks this and the two legs stop meeting. That is a
+constraint on tier 1, not a free choice: it is why hiding tier 1 (adding a blinding
+term) is a change that has to be made carefully rather than dropped in.
+
+`TestEvalSigmaPartialIsTheFoldedCommitment` computes `sigmaPartial` both ways —
+`msm(hint.G, eqTable(alphaRow))` and `msm(gens[:NumCols], foldRows(...))` — and
+requires them equal, pinning the identity rather than the code path.
+
+### 12.3 Leg 2 is CSP, not a Bulletproof
+
+The Rust reference uses a Bulletproof inner-product argument. This port uses the
+compressed sigma-protocol already in the tree (`crypto/rp/csp`), because leg 2's
+linear form is `eq(alphaCol, .)`, which the **verifier computes itself** from the
+public `alphaCol`. There is no secret vector to hide, so the Bulletproof machinery
+buys nothing over CSP — and it removes an entire protocol from the port.
+
+| CSP statement field | Titan leg 2 |
+|---|---|
+| `Commitment` | `sigmaPartial` |
+| `Generators` | the tier-1 generators `gens[:NumCols]` |
+| `LinearForm` | `eq(alphaCol, .)` — public, verifier-recomputable |
+| `Value` | `sigma`, the claimed `f(alpha)` |
+| witness | the folded row vector `a` |
+
+Prover and verifier build the statement through **one shared function**
+(`columnStatement`), so there is a single conversion path and no possibility of the
+two sides disagreeing on an encoding.
+
+Leg 2 runs under its own transcript header, `TitanEvalColumnLeg-v1`, distinct from
+leg 1's `TitanGroupSumCheck-v1` and from anything `rp.go` uses. A CSP proof produced
+for a range proof therefore cannot be replayed as a Titan column leg, nor a column
+leg as a row leg.
+
+### 12.4 The variable split is the opposite way round from the reference
+
+    alphaCol = alpha[:m/2]     // the FIRST variables index columns
+    alphaRow = alpha[m/2:]     // the LAST variables index rows
+
+This is inverted relative to the Rust reference, and it is **verified by probe, not
+assumed** — confirmed for `m = 2,3,4,5` against an independently computed `f(alpha)`.
+
+The reason follows from the layout. Row `j` is the contiguous block
+`f[j*cols : (j+1)*cols]` (section 7.1, no transpose), so the row index occupies the
+**high** bits of the flat index; and in the little-endian convention this package
+shares with `crypto/sumcheck`, the high bits are the **last** variables.
+
+**Getting this backwards is the worst bug available here**, because `eq` factorizes
+over *any* split of the variables. Both assignments produce a completely
+self-consistent proof — it simply proves a claim about a different polynomial. No
+round-trip test can see it. It fails only against an independently computed
+`f(alpha)`, which is why `TestEvalRoundTripAndMatchesDirectEvaluation` asserts *two*
+things: that verification accepts, **and** that `sigma` equals
+`FieldPoly.EvaluatePoint(alpha)`. The second assertion is the one that matters.
+
+`EvaluatePoint` is the valid cross-check because it takes its argument in **table
+order**, matching the `alpha` convention here. (`EvaluateOpening` takes folding
+order; the two differ only in argument order, which is exactly the kind of difference
+that produces a plausible wrong answer.)
+
+### 12.5 The mathlib boundary, and why the cache is shared
+
+CSP is written against mathlib (`*mathlib.G1`, `*mathlib.Zr`); this package is
+gnark-crypto (`bls12381.G1Affine`, `fr.Element`). `bridge.go` is the single place
+that conversion happens, so the cost has one home and one place to optimize.
+
+The two representations are compatible, verified rather than assumed:
+`mathlib.BLS12_381_BBS_GURVY`'s group order is bit-identical to `fr.Modulus()`, G1
+round-trips through the 48-byte compressed form, and `Zr` through 32-byte big-endian.
+`TestBridgeScalarFieldsAreIdentical` pins the order equality as a regression test,
+since the whole design rests on it. (A first comparison of the two *printed* orders
+appears to show a mismatch — that is mathlib printing hex against gnark printing
+decimal. The false alarm is easy to repeat, so it is recorded here.)
+
+Points cross **one way only**. CSP proofs are verified in mathlib, so no group
+element needs to come back; scalars do, which is why `toFieldElement` exists and has
+no point-valued counterpart.
+
+**Conversion costs ~35us per G1 point**, because every mathlib G1 constructor routes
+through `SetBytes`, which performs a subgroup check. There is no cheap path; the cost
+is structural to mathlib.
+
+This is why generators are cached in a `Generators` value, converted once and reused.
+Measured on an Apple M4 Max, `-benchtime=1s`:
+
+| m | gens | prove cached | prove uncached | verify cached | verify uncached |
+|---|---|---|---|---|---|
+| 10 | 32 | 7.88ms | 9.01ms | 0.94ms | 2.03ms |
+| 12 | 64 | 12.58ms | 14.92ms | 1.14ms | 3.41ms |
+| 14 | 128 | 22.26ms | 26.99ms | 1.42ms | 6.04ms |
+
+**The cache matters overwhelmingly on the verifier, not the prover.** At `m = 14` it
+is a 4.3x speedup on verification (6.04ms to 1.42ms), where the boundary is **77%**
+of the uncached verifier's work; on the prover the same conversion is only 18%,
+because proving does enough other work to absorb it.
+
+This overturned the original plan, which put the cache on `FieldOpeningHint` —
+prover-side state. The measurement says the verifier is the side dominated by the
+boundary, and a verifier never holds an opening hint. So `Generators` is a
+first-class type that **both** sides construct and hold:
+
+```go
+gens := ...                                        // []bls12381.G1Affine, from setup
+cached, err := titan.NewGenerators(curve, gens)    // convert once
+```
+
+`Generators` is bound to the curve it was converted for, and `prefix` rejects a
+mismatch. That guard earns its place: mathlib has four BLS12-381 entries
+(`BLS12_381`, `BLS12_381_BBS`, `BLS12_381_GURVY`, `BLS12_381_BBS_GURVY`) that share
+the group and the scalar field but carry **distinct curve IDs**, and CSP's
+`validateG1Slice` rejects any element whose ID differs from the statement's. Without
+the guard, a cache built on one variant and used on another fails deep inside CSP
+validation with a message about element curves — nothing that points at the actual
+mistake. The bridge therefore converts onto the **caller's** curve, never a
+hardcoded one.
+
+### 12.6 `m` is not recoverable from a `Commitment`
+
+The verifier takes `m` from `len(alpha)`, which is public input, and checks the
+commitment for consistency with it (`checkShape`). It cannot derive `m` from the
+commitment, and this is a genuine limitation rather than an oversight.
+
+`Commitment` carries `NumVars = log2(rows)` only. Every row count is produced by
+**two** different `m`:
+
+    rows = 2   <-  m in {1, 2}
+    rows = 4   <-  m in {3, 4}
+    ...
+    rows = 256 <-  m in {15, 16}
+
+They differ only in the column count, which the commitment does not carry. An earlier
+version of the code claimed to resolve the ambiguity by checking the row count; that
+check is **vacuous**, since both candidates reproduce it, and a test over
+`m = 1..16` caught it. `TestCheckShape` now pins the ambiguity so the claim cannot be
+made again.
+
+A consequence worth knowing: an `alpha` one coordinate short is not always caught by
+the shape check — for `m = 4` and `m = 3` the row count is the same, so a 3-coordinate
+`alpha` passes `checkShape` and is rejected downstream by leg 1 instead. The error is
+correct, but it names the round check rather than the length.
+
+Putting the column count into `Commitment` would remove the ambiguity. That is a wire
+format change, and it is not made here.
+
+### 12.7 The group case has one leg, and that is correct
+
+`EvalGroup` is **leg 1 only**. This reads like a missing half and is not: a group
+polynomial's evaluation already *is* a group element, so there is no field value to
+bind and no Pedersen tier to open. There is nothing for a second leg to prove.
+
+### 12.8 What is still open
+
+**Neither verifier is sound against a prover who lies about the oracle.** Both reduce
+the claim to a residual sum-check claim at a random point and stop there, exactly as
+[section 6.5](#65-this-reduces-the-claim-it-does-not-close-it) describes for the
+sum-check alone. Closing it needs the WHIR folding rounds plus Merkle queries at the
+residual point, which is the next step.
+
+This is stated in the godoc on `VerifyEval` as well as here, because a caller who
+read a `nil` error as "the evaluation is proved" would be wrong today. The `nil` means
+the reduction holds, not that the oracle was checked.
+
+Also still open, by design: zero-knowledge (CSP here is the non-ZK variant, tier 1 is
+non-hiding Pedersen, and leg 2's witness is the folded polynomial); `Setup`; batched
+`Eval` at several points; and the `O(n^(1/4))` variant, which needs a second folding
+layer over the *generator* oracle and is not what `k` controls.
+
+### 12.9 Mutation testing the two legs, and the gap it found
+
+Nine semantic mutations were applied to `eval.go`. Seven were caught; the two
+survivors are worth recording individually, because they are not the same kind of
+result.
+
+| Mutation | Caught by |
+|----------|-----------|
+| `alphaCol`/`alphaRow` swapped | round-trip, `sigmaPartial` cross-check, `foldRows`, validation |
+| verifier's leg-2 linear form uses `eq(alphaRow, .)` | round-trip, `EvalAffine` agreement, validation |
+| `sigma` computed over row 0 instead of the folded vector | round-trip, `EvalAffine` agreement, validation |
+| leg 1's error ignored | tampered `sigmaPartial`, tampered row leg, leg independence |
+| leg 2 reuses leg 1's domain separator | **nothing — see below** |
+| prover binds leg 2 to a recomputed MSM rather than leg 1's output | **nothing — equivalent mutant, see below** |
+
+**The separator mutation was a real gap.** Replacing `evalTranscriptHeader` with
+`DomainSeparator` left the entire suite green. Nothing observable changes when both
+legs share a separator — proofs still verify — but the separation is exactly what
+stops a CSP proof produced elsewhere in the tree from being replayed as a Titan
+column leg. No round-trip or negative test can reach it, because both sides of the
+protocol move together. It needed a direct assertion, so
+`TestEvalTranscriptHeaderIsDistinct` pins the value and
+`TestEvalColumnLegRejectsForeignTranscript` proves the header does real work: a CSP
+proof over the *identical* statement and witness but a different header must not
+verify, while the honest header must.
+
+**The other survivor is an equivalent mutant, not a gap.** Having the prover
+recompute `MSM(gens, a)` instead of using the `sigmaPartial` that leg 1 returned
+produces the same group element — that *is* the identity of
+[section 12.2](#122-why-one-element-can-be-both-an-evaluation-and-a-commitment), and
+`TestEvalSigmaPartialIsTheFoldedCommitment` asserts precisely that the two agree. No
+test can distinguish them, and none should. The code takes the value from leg 1
+anyway, since deriving it twice creates two places that could later drift apart while
+the proof still verifies; that is a maintainability argument, not a soundness one, and
+it is not a claim any test is failing to check.
+
+### 12.10 API
+
+| Function | Input | Output | Used for |
+|----------|-------|--------|----------|
+| `NewGenerators(curve, gens)` | `[]bls12381.G1Affine` | `*Generators` | convert the generators once; hold on both sides |
+| `(*FieldOpeningHint).Eval(curve, gens, alpha)` | cached generators, point | `*EvalProof`, `sigma` | prove `f(alpha) = sigma` |
+| `VerifyEval(curve, c, gens, alpha, sigma, proof)` | commitment + public data | residual opening | check that claim (see 12.8) |
+| `(*GroupOpeningHint).EvalGroup(curve, alpha)` | point | `*GroupEvalProof`, `sigma` | prove `G(alpha) = sigma`, leg 1 only |
+| `VerifyEvalGroup(curve, c, alpha, sigma, proof)` | commitment + public data | residual opening | check that claim |
+| `EvalAffine` / `VerifyEvalAffine` | raw `[]bls12381.G1Affine` | as above | one-off calls; converts per call |
+
+```go
+cached, err := titan.NewGenerators(curve, gens)
+if err != nil {
+    return errors.Wrap(err, "failed to convert the generators")
+}
+
+proof, sigma, err := fhint.Eval(curve, cached, alpha)
+if err != nil {
+    return errors.Wrap(err, "failed to prove the evaluation")
+}
+
+opening, err := titan.VerifyEval(curve, c, cached, alpha, sigma, proof)
+if err != nil {
+    return errors.Wrap(err, "evaluation proof did not verify")
+}
+// opening is the residual claim; the caller MUST still close it (12.8).
+```
+
+`EvalAffine` and `VerifyEvalAffine` take generators in affine form and convert
+internally. They exist for one-off calls and tests; anything in a loop, and **any
+verifier**, should hold a `*Generators` instead — see the table in 12.5 for what the
+difference costs.
+
+Both verifiers return the residual `*GroupSumCheckOpening` rather than a bare error,
+so the caller has the point and value the oracle queries must be made at.
+
+## 13. References
 
 - Titan paper — `eprint_version/` in the `titan` project; `group-sum-check.tex`
   covers the group oracle encoding and the efficient group sum-check.

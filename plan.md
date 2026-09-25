@@ -199,11 +199,101 @@ argument), not at `Eval` time.
 - **Issue still owed** for the step-3 work (`gh` unavailable in this environment);
   step 4 needs one too.
 
+### Two findings that changed the plan
+
+- **The cache belongs to the verifier, not the prover — measured, and it inverted the
+  plan.** Section "Measured" above reasoned that generators convert once per
+  *commitment* and so should be held on `FieldOpeningHint`. That is prover-side state,
+  and **a verifier never holds an opening hint**. Benchmarking showed the verifier is
+  the side the boundary dominates (M4 Max, `-benchtime=1s`):
+
+  | m | gens | prove cached | prove uncached | verify cached | verify uncached |
+  |---|---|---|---|---|---|
+  | 10 | 32 | 7.88ms | 9.01ms | 0.94ms | 2.03ms |
+  | 12 | 64 | 12.58ms | 14.92ms | 1.14ms | 3.41ms |
+  | 14 | 128 | 22.26ms | 26.99ms | 1.42ms | 6.04ms |
+
+  At m=14 the cache is a **4.3x** speedup on verification and the boundary is **77%**
+  of the uncached verifier, against **18%** of the prover. So the cache became a
+  first-class exported `Generators` type that both sides build and hold, with
+  `EvalAffine`/`VerifyEvalAffine` kept as documented one-off paths. Measured per-point
+  cost is ~35us, close to the ~33us probed earlier.
+
+- **`m` is not recoverable from a `Commitment`, and my first attempt to recover it was
+  vacuous.** I wrote `varsFromCommitment` to derive `m` from the commitment, resolving
+  the odd/even ambiguity "by checking the row count". **That check is vacuous**: every
+  row count is produced by two different `m` (rows=2 <- m in {1,2}, ..., rows=256 <-
+  m in {15,16}), differing only in the column count, which `Commitment` does not carry
+  — so both candidates reproduce the row count and the even one was simply tried
+  first. My own test over m=1..16 caught it. Replaced with `checkShape(c, m)`, taking
+  `m` from `len(alpha)` (public input) and validating the commitment against it;
+  `TestCheckShape` now pins the ambiguity so the claim cannot be re-made. A
+  consequence: an `alpha` one coordinate short can pass `checkShape` and be rejected
+  by leg 1 instead, so the error names the round check rather than the length.
+  Adding the column count to `Commitment` would fix this properly; that is a wire
+  format change and was not made.
+
+### Smaller decisions
+
+- **The variable split is the opposite way round from the Rust reference**, verified by
+  probe for m=2..5 rather than assumed: `alphaCol = alpha[:m/2]`, `alphaRow =
+  alpha[m/2:]`. Rows are contiguous blocks, so the row index is the *high* bits of the
+  flat index, and little-endian makes the high bits the *last* variables. This is the
+  worst available bug here because `eq` factorizes over any split — a swapped split
+  self-verifies against a different polynomial. Only the independent
+  `EvaluatePoint(alpha)` cross-check catches it.
+- **`sigmaPartial` is taken from `ProveGroupEval`'s return, not derived a second
+  time.** Deriving it twice would let the two derivations disagree silently, and
+  `sigmaPartial` is the only thing binding the two legs.
+- **A `Generators` cache is bound to its curve, and `prefix` enforces it.** mathlib has
+  four BLS12-381 IDs sharing the group and scalar field, and CSP's `validateG1Slice`
+  rejects on ID mismatch — so a cross-variant cache otherwise fails deep inside CSP
+  validation with a message about element curves. Found while noticing
+  `groupsumcheck_test.go` uses `BLS12_381_BBS` while `bridgeCurve()` returns
+  `BLS12_381_BBS_GURVY`; pinned with a four-variant bridge test, and the guard then
+  immediately caught a real mismatch in an existing `Eval` test.
+- **`EvalProof` has no `Queries` field yet**, unlike the sketch in 4.3. The oracle
+  openings are step 5; a present-but-nil field would imply the soundness gap is
+  smaller than it is.
+
 ## Implementation Progress
 
-- [ ] 4.1 `crypto/rp/csp` exported wrapper + tests
-- [ ] 4.2 `titan/bridge.go` + tests
-- [ ] 4.3 `titan/eval.go` (field `Eval`, group `EvalGroup`) + verifiers
-- [ ] 4.4 Tests, negatives, leg-independence, mutation pass
-- [ ] 4.5 `docs/crypto/titan.md` §13 Evaluation; update §8 API
-- [ ] 4.6 Benchmarks incl. the cached-vs-uncached boundary cost
+- [x] 4.1 `crypto/rp/csp` exported wrapper + tests — `ProveLinearForm`/`VerifyLinearForm`
+      plus `LinearFormStatement`; committed as `f8d313bc`. No change to the existing
+      `prover`/`verifier` internals or to `rp.go`'s call sites.
+- [x] 4.2 `titan/bridge.go` + tests — `toMathG1`/`toMathG1Slice`/`toMathZr`/
+      `toMathZrSlice`/`toFieldElement`. Added `ErrPointAtInfinity`. Signatures differ
+      from the plan's sketch: the `Zr` converters return an `error` too, since
+      `NewZrFromBytes` can fail. Points cross one way only (CSP verifies in mathlib),
+      so there is no reverse for G1; scalars do come back.
+- [x] 4.3 `titan/eval.go` (field `Eval`, group `EvalGroup`) + verifiers. Two
+      deviations from the plan's sketch, both recorded under Notes below:
+      the generator cache is a shared `Generators` type, not a field on
+      `FieldOpeningHint`; and `EvalProof` carries no `Queries` field yet, since the
+      oracle queries belong to step 5 and a nil-but-present field would suggest
+      otherwise.
+- [x] 4.4 Tests, negatives, leg-independence. Coverage 92.6%, race-clean. The
+      round-trip asserts *both* acceptance and `sigma == EvaluatePoint(alpha)`; the
+      second assertion is the one that can catch a swapped variable split.
+- [x] 4.5 `docs/crypto/titan.md` — Evaluation added as **§12** (not §13: References
+      was §12 and is now §13), with §8's API table and §11's coverage table updated.
+- [x] 4.6 Benchmarks incl. the cached-vs-uncached boundary cost. Numbers in the
+      Notes below; they changed the design.
+
+### Still owed on step 4
+
+- [ ] `make lint` — `golangci-lint` is absent in this environment, so it has **not**
+      been run and must not be claimed as passing.
+- [ ] GitHub issues for steps 3 and 4 — `gh` is unavailable here. Step 3's commit
+      (`cdcc053c`) already precedes its issue, inverting the intended order; the fix
+      is to open the issue, then amend `cdcc053c` with `Fixes #N` before pushing.
+- [x] Mutation pass over `eval.go` (item 4.4's point 8). Nine mutations, seven
+      caught. **One real gap found**: leg 2 reusing leg 1's domain separator left the
+      suite green, so two tests were added
+      (`TestEvalTranscriptHeaderIsDistinct`, `TestEvalColumnLegRejectsForeignTranscript`)
+      and the mutation now fails both. The other survivor — the prover recomputing
+      `MSM(gens, a)` instead of reusing leg 1's `sigmaPartial` — is an **equivalent
+      mutant**: the two values coincide by the section-12.2 identity, which
+      `TestEvalSigmaPartialIsTheFoldedCommitment` already asserts, so no test can or
+      should distinguish them. Documented in docs section 12.9 rather than papered
+      over.
