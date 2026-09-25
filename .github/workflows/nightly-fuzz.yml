@@ -93,6 +93,12 @@ jobs:
           - name: zkatdlog-upgrade-proof-deserialize
             pkg: ./token/core/zkatdlog/nogh/v1/crypto/upgrade
             func: FuzzProofDeserializeNoPanic
+          - name: zkatdlog-sumcheck-verify
+            pkg: ./token/core/zkatdlog/nogh/v1/crypto/sumcheck
+            func: FuzzVerify
+          - name: zkatdlog-sumcheck-field-poly
+            pkg: ./token/core/zkatdlog/nogh/v1/crypto/sumcheck
+            func: FuzzNewFieldPoly
           - name: fabricx-endorser-for-threshold-rule
             pkg: ./token/services/network/fabricx/endorsement
             func: FuzzEndorserForThresholdRuleNoPanic

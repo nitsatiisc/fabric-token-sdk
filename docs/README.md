@@ -13,6 +13,10 @@ Welcome to Panurus documentation.
 *   [**Upgradability**](upgradability.md): How to upgrade tokens, drivers, and storage.
 *   [**Public Parameters Lifecycle**](public_parameters.md): How public parameters are generated, published, and updated across the network.
 
+## Cryptographic Primitives
+
+*   [**Sum-Check Protocol**](crypto/sumcheck.md): Field and group sum-check over BLS12-381 G1, used to reduce a claim about a hypercube sum to a single evaluation.
+
 ## Command-Line Tools
 
 Panurus ships several standalone CLI tools, each living in its own Go module under `cmd/`.
