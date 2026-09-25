@@ -1,5 +1,50 @@
 # Plan: Titan multilinear PCS — step 5 (folding: closing the evaluation claim)
 
+> ## ⏸️ PAUSED — resume here
+>
+> Step 5 is **functionally complete and committed** (`95eb7b4a` folding + coseting,
+> `42b243d1` batching). `Eval`/`EvalGroup` are now sound polynomial commitment openings
+> at ~128 bits under the capacity bound. Suite green, race-clean, `go vet`/`gofmt` clean,
+> coverage 91.0%, 16 mutations each caught by a named test.
+>
+> **Branch `sumcheck` is 8 commits ahead of `origin/sumcheck` and has NOT been pushed —
+> no go-ahead was given.**
+>
+> To pick this up, in order:
+>
+> 1. **`make lint`** — `golangci-lint` is absent in this environment, so it has never been
+>    run on steps 3–5 and **must not be claimed as passing**. Run it first; it is the most
+>    likely source of surprises before a push.
+> 2. **GitHub issues for steps 3, 4 and 5** — `gh` was unavailable here. Note step 3's
+>    commit `cdcc053c` *precedes* its issue: open the issue, then amend `cdcc053c` with
+>    `Fixes #N` **before** pushing, since amending after a push rewrites published history.
+>    Every issue needs Assignee, Labels, Milestone, Project (`"Panurus"`) and an Issue Type
+>    (via `gh api graphql` `updateIssueIssueType`) — see AGENTS.md.
+> 3. **Push + PR**, only with the user's explicit go-ahead.
+> 4. Optional leftover: benchmark the `EncodeGroupOracleAt`-vs-`EncodeGroupOracle`
+>    crossover. The godoc claims the butterfly wins when most of the codeword is wanted;
+>    that is reasoning, not measurement, and is flagged as such in the godoc.
+>
+> **Next structural step (a new plan, not step 5):** the verifier is still linear in
+> `2^(m−ℓ)` because `Reduced` is sent in plain. Batching removed the factor of `Q`, not
+> the term. Recursing instead of sending it — fold again over the reduced oracle, repeat
+> until small enough to send — is WHIR proper and is what makes the verifier
+> polylogarithmic. Also still deferred by design: `O(n^(1/4))` (a second folding layer
+> over the *generator* oracle, which is **not** what `k` controls), zero-knowledge,
+> `Setup`, batched `Eval` at several points, serialization.
+>
+> **Two traps to re-read before touching the fold tests** (both cost real time here, and
+> are written up in `docs/crypto/titan.md` §13.7):
+> - A Merkle leaf is hashed **whole**, so `VerifyMerkleProof` rejects any tampered leaf
+>   *before* the check under test runs. Four tests in this work passed for the wrong
+>   reason this way; one went through three wrong versions. A negative test that tampers
+>   with a leaf is almost certainly not testing what its name says.
+> - `γ`-weighting in batched check 3 is **defence in depth**, not load-bearing; the
+>   absorb-before-sample transcript ordering is what makes it sound. The unweighted-sum
+>   mutation surviving is *correct*, not a missing test.
+>
+> Full narrative of this work: `claude-chat`, "Session 3".
+
 Steps 1–4 are complete and committed (`ccc7e99d`, `3dd550d8`, `cdcc053c`, `f8d313bc`,
 `94173bd4`). Earlier plans are preserved in git history (`git show cdcc053c:plan.md`).
 **Step 4's plan is retained below for context; step 5 is at the end.**
