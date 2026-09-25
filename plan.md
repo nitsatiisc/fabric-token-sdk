@@ -264,9 +264,55 @@ as loudly.
   **98.1% statement coverage, race-clean, `go vet` clean.** Six mutations each
   independently fail the suite (see `docs/crypto/titan.md` §9). Docs written and
   linked from `docs/README.md`.
-- [ ] Pending — 2. `groupsumcheck.go`: `foldFirst`, `eqTable`, `batchInvert` with a
-  real zero-denominator error, `computeSTables`, `roundMessages`, `ProveGroupEval` /
-  `VerifyGroupEval`, with cross-check against `crypto/sumcheck` and `ℓ`-invariance.
+- [x] Done — 2. `multilinear.go` + `groupsumcheck.go`: `foldFirstField` /
+  `foldFirstGroup`, `eqTable`, `eqPoint`, `batchInvert` with a real
+  zero-denominator error, `msm`, `scaleEach`, `computeSTables`,
+  `roundMessageFromTable` (H0/H1 split), `roundMessageFolklore`, `restrictBoth`,
+  `interpolateGroupAt`, `ProveGroupEval` / `VerifyGroupEval`.
+  Tests in `groupsumcheck_test.go`, benchmarks in `groupsumcheck_bench_test.go`.
+  **92.6% statement coverage, race-clean, `go vet` clean.** Eleven mutations each
+  independently fail the suite (see `docs/crypto/titan.md` §10). Cross-check against
+  `crypto/sumcheck` passes; `ℓ`-invariance holds for every `ℓ ∈ [0, m]`.
+  Verifier written from the paper, since the Rust one is incomplete. Docs added as
+  `docs/crypto/titan.md` §6 (protocol), §7 (API), §8.2 (measurements), §10 (testing).
+
+## ✅ COMPLETE
+
+Both planned steps are done. Remaining work is step 3+ (Merkle oracle, WHIR folding,
+CSP eval, full `Commit`/`Eval`), which is out of scope for this plan.
+
+### Decisions taken during step 2
+
+- **`restrictBoth` is a batched MSM contraction, not repeated folding.** The naive
+  version (fold one variable at a time, `ℓ` times) measured **221 ms** of a 250 ms
+  prover at `m=12, ℓ=6` and made the choice of `ℓ` look irrelevant — the split sweep
+  came out flat. Contracting against the `eq(ρ,·)` table instead, one MSM per
+  surviving entry, cut it to ~8 ms and restored the expected curve (minimum at
+  `m/2`, **6.2×** the folklore baseline). Same scalar-mult count; Pippenger
+  amortizes the window setup. Recorded with the phase-by-phase numbers in
+  `docs/crypto/titan.md` §8.2.
+- **No transpose in `restrictBoth`**, unlike `computeSTables`. First-variable
+  folding makes the consumed prefix the low bits *within* each contiguous block, so
+  the slice is already contiguous; it is the surviving suffix that is strided in
+  `computeSTables`. I had this backwards on the first attempt and the cross-path
+  tests caught it immediately.
+- **`σ` is returned, not taken as an argument.** It is determined by `f` and `α`, so
+  accepting it would invite a caller to pass an inconsistent value.
+- **`ℓ` is bound into the transcript** even though it is only a performance knob:
+  both sides must agree on it to agree on the challenges, and binding it is free.
+  Consequence: proofs for different `ℓ` cannot be compared round-by-round, so
+  `ℓ`-invariance is tested on the claimed sum plus a separate direct comparison of
+  the two round-message paths at equal challenges.
+- **`ErrZeroDenominator` surfaces only when the affected round is an MSM round**, as
+  the folklore path contains no division by `eq(α_i,·)`. The boundary test therefore
+  runs with `ℓ = m`.
+- Benchmarks needed `*testing.B` copies of the random-input helpers; the step-1
+  helpers take `*testing.T` and Go has no common interface covering both that also
+  provides `Fatal` plus `Helper` in the way these use them.
+- No fuzz target yet — still owed when proof deserialization lands, and it must be
+  wired into `.github/workflows/nightly-fuzz.yml` per AGENTS.md.
+- `make lint` still not run: `golangci-lint` is not installed in this environment.
+  `go vet`, `gofmt` and the race detector are all clean.
 
 ## Notes & Decisions
 
