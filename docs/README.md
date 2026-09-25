@@ -16,6 +16,7 @@ Welcome to Panurus documentation.
 ## Cryptographic Primitives
 
 *   [**Sum-Check Protocol**](crypto/sumcheck.md): Field and group sum-check over BLS12-381 G1, used to reduce a claim about a hypercube sum to a single evaluation.
+*   [**Titan Polynomial Commitment Scheme**](crypto/titan.md): Multilinear PCS for both field and group polynomials, combining Pedersen commitments to the witness matrix with a WHIR-style IOPP over group elements.
 
 ## Command-Line Tools
 

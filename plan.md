@@ -1,230 +1,313 @@
-# Plan: `sumcheck` package (field and group sum-check over BLS12-381 G1)
+# Plan: Titan multilinear PCS — steps 1 and 2
 
 ## Goal
 
-Add `token/core/zkatdlog/nogh/v1/crypto/sumcheck` implementing an interactive
-(Fiat-Shamir compiled) sum-check protocol for claims of the form
+Port the Titan polynomial commitment scheme (Kamath, Prakash, Samanta, Sekar,
+Singh — *Titan: Efficient Polynomial Commitments from IOPs over Groups*) from the
+Rust reference at `~/IdeaProjects/titan-implementation` to Go over BLS12-381 G1.
 
-    H = sum over x in {0,1}^mu of p(x),   p(X) = f_1(X) * ... * f_k(X) * g_1(X)
+Titan commits a field multilinear in two tiers: Pedersen-commit the rows of the
+`q × q` matrix form of `f̃`, interpolate the resulting `q` group elements into a
+group multilinear `G̃`, then commit `G̃` with a WHIR-style IOPP over groups. The
+reason for choosing it here is that **a group polynomial commitment falls out as a
+by-product** — the inner oracle `⟦G⟧` *is* a commitment to a group multilinear, so
+one scheme serves both the field and group cases zkatdlog needs.
 
-where `f_i` are multilinear polynomials over the scalar field F_r, and `g_1` is
-an **optional** multilinear polynomial whose evaluations are points in G1. At
-most one group factor is allowed, since a product of two group elements is not
-defined in this setting. `k >= 0`.
+Design reference: `~/IdeaProjects/titan/eprint_version` (most detailed version).
+Rust reference: `~/IdeaProjects/titan-implementation` (Pasta curves, ~6.4k lines).
 
-Round polynomial degree is `k+1` when a group factor is present and `k` when it
-is absent, so each round sends `deg+1` evaluations and the verifier interpolates.
+**This plan covers steps 1 and 2 only**, per the user's instruction to plan before
+coding. Later steps (Merkle coset oracle, WHIR folding, CSP eval, full PCS) get
+their own plan once these land.
 
-Challenges are always drawn from F_r, including in the group case.
+## Scope decisions (fixed by the user)
 
-## Design decisions (fixed)
+1. **The existing `crypto/sumcheck` package stays as it is.** Efficient group
+   sum-check is *not* a replacement for it. It applies only to the specialised form
+   `Σ_x eq(α,x)·f̃(x) = σ` corresponding to an *evaluation claim*, and is only
+   worthwhile when `f̃` is a **group** polynomial. It is an additional primitive
+   used inside the Titan PCS eval path, not a general-purpose sum-check.
+2. **New sibling package**, not an extension of `crypto/sumcheck`.
+3. **Target the simplified `O(√n)` variant first.** The `O(⁴√n)` optimisations
+   (coset-wise Merkle leaves, early CSP termination with folded generators) layer
+   on afterwards.
+4. **Merkle tree: adapt gnark-crypto's `accumulator/merkletree`.** The arkworks
+   tree the Rust uses is heavily templatised and supports path compression; the
+   first cut does **not** need path compression.
+5. Commit on the existing `sumcheck` branch.
 
-1. **Transcript**: reuse `csp.Transcript` from
-   `token/core/zkatdlog/nogh/v1/crypto/rp/csp`, with its own domain separator
-   `"SumCheck-v1"` via `InitHasherWithDomain`. Never reset mid-protocol, so each
-   challenge binds all prior data.
-2. **Final evaluation claim**: `Verify` returns the challenge vector `r` together
-   with the claimed per-factor evaluations and lets the caller discharge them
-   (via a PCS, an oracle, or direct evaluation). Keeps the package
-   commitment-scheme agnostic.
-3. **Field arithmetic**: convert `*mathlib.Zr` to `fr.Element` **once** at the
-   API edge, run every round in `fr.Element`, convert back only for the proof
-   round polynomials, transcript absorption, and returned claims.
-4. **Group arithmetic**: accumulate in `bls12381.G1Jac`, normalize to affine only
-   where needed, keep `*mathlib.G1` at the API edge.
-5. **Errors**: sentinel `var` errors with stdlib `errors.New` (matching
-   `rp/csp/errors.go`); all *construction* and wrapping via
-   `github.com/hyperledger-labs/fabric-smart-client/pkg/utils/errors`. Never
-   `fmt.Errorf`.
+## Target location
 
-## Measurements that shaped the design
+    token/core/zkatdlog/nogh/v1/crypto/titan
 
-All on Apple M4 Max, BLS12-381, n = 4096 evaluations, full fold (log n rounds).
+Sibling of `sumcheck`, `rp`, `math`, `common`, `upgrade` under `nogh/v1/crypto`,
+matching where the existing crypto packages live.
 
-### Field side — confirms the instruction to avoid bulk `mathlib.Zr`
+## Curve portability — checked, not assumed
 
-| pattern                                   | mathlib `Zr` | gnark `fr` (incl. conversion) |
-|-------------------------------------------|--------------|-------------------------------|
-| single pass: sum of `x_i * y_i`           | 249 us       | 305 us  (**slower**)          |
-| sum-check shaped: log n folds, same data  | 383 us       | 182 us  (**2.1x faster**)     |
+| Property | Pasta (Pallas `Fq`) | BLS12-381 `Fr` | Consequence |
+|---|---|---|---|
+| Two-adicity | 32 | **32** | smooth domain `L ⊆ F` ports directly; `2^32` max in both |
+| Scalar field bits | ~255 | ~255 | same |
+| Base field bits | ~255 | **~381** | G1 elements are larger; MSM slower per element |
+| Pairing | none | yes (unused) | we pay G1 size for a feature Titan does not need |
 
-Conclusion: the win comes from converting **once at the edge** and staying in
-`fr` across all rounds. Converting per call is a loss. `fr.Element <-> Zr`
-round-trips losslessly through 32 bytes (verified over 2000 random values for
-round-trip identity and for mul/add/sub agreement).
+The two-adicity match is the load-bearing fact: WHIR folding needs a smooth
+multiplicative subgroup `L` of size `2^d`, and BLS12-381 `Fr` supports exactly the
+same `d ≤ 32` as Pallas. So no domain-construction redesign is needed. Verified by
+factoring `r - 1` for both fields rather than trusting the curve documentation.
 
-Incidental: on the BLS12-381 path `mathlib.Zr` already stores an `fr.Element`
-internally, so the avoided cost is per-op heap allocation (`&Zr{}` per
-`Plus`/`Mul`/`Minus`) and wrapper indirection, not `big.Int` reduction.
+## Indexing convention — the same as ours
 
-### Group side — corrects two assumptions I had carried into the design
+The Rust indexes multilinear coefficients as
+`coeffs[b_1 + 2·b_2 + … + 2^{m-1}·b_m]` (`utils.rs:311`), i.e. variable 1 at the
+LSB. **This is the same little-endian convention as our Go `FieldPoly`**, so
+`GroupPoly`/`FieldPoly` tables port index-for-index with no relabelling.
 
-| measurement (n = 4096)                            | time    |
-|---------------------------------------------------|---------|
-| `mathlib.G1` fold (Copy/Sub/Mul/Add per element)  | 227 ms  |
-| gnark `G1Jac` fold, `big.Int` per element         | 300 ms  |
-| gnark `G1Jac` fold, `big.Int` **hoisted per round** | 190 ms  |
-| mixed affine/Jac fold with `AddMixed`             | 198 ms  |
-| **isolated: n-1 scalar multiplications**          | **161 ms** |
-| **isolated: n-1 Jacobian additions**              | **1.2 ms** |
-| `mathlib.G1` -> `G1Affine` conversion-in alone    | 108 ms  |
+One wrinkle to carry carefully: the Rust has **two** folds —
 
-Three corrections to the earlier plan:
+| Rust | pairing | substitutes |
+|---|---|---|
+| `MultilinearPoly::fold` (`multilinear.rs:49`) | `i`, `i + n/2` | **last** variable |
+| `MultilinearPoly::fold_first` (`multilinear.rs:69`) | `2i`, `2i+1` | **first** variable |
 
-- **`mathlib.G1` does NOT expose the raw gnark point.** `mathlib.G1` wraps
-  `driver.G1` in an **unexported** field `g1` (`math.go:415`). The embedded
-  exported `G1Affine` is on the *driver* type one level down, which is not what
-  callers hold. The only boundary is `Bytes()`/`Compressed()` ->
-  `SetBytes`, and `SetBytes` runs a subgroup membership check, costing 108 ms for
-  n = 4096 — roughly half the cost of the entire mathlib fold. So converting the
-  group side in is **not** free and does not pay for itself on its own.
-- **Hoisting matters more than representation.** Naive Jacobian folding is
-  *slower* than mathlib (300 ms vs 227 ms) because of a per-element
-  `fr.Element -> big.Int` conversion. Hoisting that conversion to once per round
-  is what makes Jacobian win (190 ms), and even then only by ~1.2x.
-- **85% of the fold is scalar multiplication** (161 ms of 190 ms); additions are
-  137x cheaper. So the group design must be driven by *eliminating scalar
-  multiplications*, not by representation tuning.
+and `group_sumcheck.rs` uses **`fold_first`** in its tail rounds. Our Go
+`fold` is the *last*-variable one (pinned by `TestFoldSubstitutesLastVariable`).
+So the port needs an explicit first-variable fold; it must be a **new function**,
+not a change to the existing one. See step 2.
 
-### Resulting group strategy
+Separately, `multilinear_fft` bit-reverses before the butterfly precisely to
+reconcile the two (`utils.rs:340-343`). That reconciliation has to be ported
+verbatim or the encoding is silently wrong — see step 1.
 
-Fold as `g'(i) = g(i) + r * (g(i+half) - g(i))`, but note the per-round
-challenge `r` is a **single** scalar shared by every element in the round. So:
+## Step 1 — Group oracle encoding (`encode.go`)
 
-- Convert `r` to `big.Int` **once per round**, never per element.
-- Prefer accumulating differences and using one batched `MultiExp` per round over
-  n/2 independent `ScalarMultiplication` calls, since `MultiExp` amortizes the
-  window precomputation across the whole round. Additions being near-free means
-  the Jac/affine mix should be chosen to minimize *inversions*, using
-  `BatchJacobianToAffineG1` when a batch normalization is needed.
-- Accept `*mathlib.G1` at the edge but document that a caller in a hot loop
-  should hand over already-converted points, because the 108 ms conversion is
-  otherwise the single largest line item.
+Ports §"Encoding Group Oracle" of the eprint and `multilinear_fft` from
+`utils.rs:326`. The paper says this "ports nearly as is", and it does.
 
-## Implementation steps
+**What it computes.** Given a group multilinear `G̃ ∈ G[X_1..X_m]` in evaluation
+basis (our `GroupPoly`) and a smooth domain `L ⊆ F` with `|L| = 2^d`, `d ≥ m`,
+produce the Reed-Solomon codeword `{Ĝ(x) : x ∈ L}` where
 
-1. `errors.go` — sentinel errors (nil curve, nil polynomial, length not a power
-   of two, mismatched variable counts, more than one group polynomial, round
-   polynomial degree mismatch, final check failure).
-2. `poly.go` — field and group multilinear types; conversion helpers
-   (`Zr <-> fr.Element`, `mathlib.G1 <-> G1Affine`) with the "convert once"
-   contract documented; in-place `fold` for both; `Sum`, `Evaluate`.
-3. `prover.go` — `Prove`: per round, compute the `deg+1` evaluations of the round
-   polynomial, absorb, squeeze the challenge, fold every factor in place.
-4. `verifier.go` — `Verify`: recompute each round's consistency check by
-   interpolating the received evaluations, re-derive challenges from the same
-   transcript, return `(r, fEvals, gEval)`.
-5. `sumcheck_test.go` — table-driven: k = 0,1,2,3 field factors, with and without
-   a group factor, mu = 1..10; completeness, and a cross-check that the group
-   variant agrees with the field variant scaled into G1.
-6. `sumcheck_soundness_test.go` — negatives: tampered round polynomial, wrong
-   claimed sum, swapped challenge, extra/missing round, two group polynomials.
-7. `fuzz_test.go` — `FuzzProofUnmarshal` over the serialized proof if a wire
-   format is added; register in `.github/workflows/nightly-fuzz.yml`.
-8. Docs: add `docs/cryptography/sumcheck.md` and link it from the nearest index.
+    Ĝ(X) = G̃(X, X^2, X^4, …, X^(2^(m-1)))
+
+**How, and why it is cheap.** Never form `Ĝ` explicitly. Use the recursion
+
+    G̃(x, x², …) = (1-x)·G̃(0, x², …) + x·G̃(1, x², …)
+
+as a butterfly over `L`, consuming the hypercube evaluations `G_1..G_n` directly at
+the final layer. Costs `(n/2)·log n` scalar multiplications against `≈ n·log n` to
+build `Ĝ` explicitly.
+
+**Sub-items:**
+
+1. `Domain` type: a smooth multiplicative subgroup of `Fr` of size `2^d`, built
+   from a generator of the `2^32`-torsion. Reject `d > 32` with a named error, and
+   reject `d < m`.
+2. `reverseBits` / `bitReversePermutation` — port of `utils.rs:296-322`.
+3. `EncodeGroupOracle(p GroupPoly, dom *Domain) ([]bls12381.G1Affine, error)` —
+   the butterfly of `utils.rs:326`, including the **bit-reversal before** the
+   butterfly and the `d > m` blow-up (each coefficient repeated `2^(d-m)` times).
+4. A field-side `EncodeFieldOracle` for the generator polynomial `g̃` (commit step
+   4 of the paper gives the verifier `⟦g⟧`; generators are public).
+
+**How it gets verified — this is the part that matters.** The butterfly is exactly
+the kind of code that passes a round-trip test while computing the wrong thing, so:
+- **Direct cross-check**: for small `m` (1..8), compute `Ĝ(x)` for every `x ∈ L` by
+  naive evaluation of `G̃(x, x², …, x^(2^(m-1)))` using our existing
+  `GroupPoly.EvaluatePoint`, and require equality with the butterfly output. This
+  is an independent implementation, not a re-derivation.
+- **Degree check**: the output must be a codeword of `RS[G, L, m]`. With `d > m`,
+  inverse-FFT the result and assert coefficients above `2^m` are zero.
+- **Bit-reversal mutation**: deleting the `bitReversePermutation` call must make
+  the cross-check fail. If it does not, the test is not exercising the ordering and
+  the convention is unpinned.
+
+## Step 2 — Efficient group sum-check (`groupsumcheck.go`)
+
+Ports §"Efficient Group Sumcheck" + §"Computing round messages in group sumcheck"
+and `group_sumcheck.rs`. **Additive to `crypto/sumcheck`, which is untouched.**
+
+**The claim form.** Only this shape, and only for a group `f̃`:
+
+    Σ_{x ∈ {0,1}^m} eq(α, x) · f̃(x) = σ,   f̃ ∈ G, σ ∈ G
+
+This is an *evaluation* claim: `σ = f̃(α)`. The specialisation is what buys the
+speedup — the general `crypto/sumcheck` cannot exploit it.
+
+**Why it is faster.** Naive group sum-check costs `O(n)` group exponentiations.
+This variant costs `√n` MSMs of size `√n` plus `O(√n)` group-exp — the paper notes
+an optimised Pippenger MSM is 20–50× faster than the equivalent exponentiations,
+and our own measurement on the existing package agrees that scalar multiplication
+is ~85% of a group fold.
+
+**Mechanism.** With `ℓ = m/2`, precompute partial-sum tables
+
+    S_i(b) = Σ_{x ∈ {0,1}^(m-i)} h̃(b, x),   h̃(x) = eq(α,x)·f̃(x)
+
+- `S_ℓ` costs `2^ℓ` MSMs of size `2^ℓ`. Requires a **transpose** of both the `eq`
+  and `f` tables so each slice is contiguous (`compute_Sl_poly`, `group_sumcheck.rs:37-52`).
+- `S_(i-1)(b) = S_i(b,0) + S_i(b,1)` — each lower table is `2^i` group *additions*,
+  which our measurements put at ~137× cheaper than scalar mults.
+- Round messages for `i ≤ ℓ` come from an MSM of size `O(2^i)` over `S_i`:
+
+      g_i(u) = Σ_{b ∈ {0,1}^i} [ eq(z,b)·eq(z,α_i) / eq(α_i,b) ] · S_i(b)
+
+  The Rust further isolates the `u`-dependent part into two MSMs `H0`, `H1` of size
+  `2^(i-1)` plus scalar factors (`compute_gi_values`), so the three evaluations
+  `u ∈ {0,1,2}` share the MSM work. Port that optimisation; it is not in the paper
+  text but is a clear win.
+- For `i > ℓ` the polynomial is down to `O(√n)` and rounds are computed the
+  folklore way — **this is where the tail uses a first-variable fold**, per the
+  convention note above.
+
+**Round degree is 2, not 1.** `h̃ = eq · f̃` is a product of two multilinears, so
+`g_i` is quadratic and needs three evaluations `u ∈ {0,1,2}` — hence
+`eval_triple_at_alpha` doing Lagrange interpolation on three points.
+
+**Sub-items:**
+
+1. `foldFirst` on `GroupPoly` and `FieldPoly` — first-variable fold, `2i`/`2i+1`.
+   New function; the existing last-variable `fold` is not touched. Doc must state
+   which is which and why both exist, mirroring the existing `fold` comment.
+2. `eqTable(alpha)` — the `eq` evaluation table (`init_with_eq`, `multilinear.rs:27`).
+   Check whether `rp/csp` already has one before writing a second.
+3. `batchInvert` for the `1/eq(α_i,b)` denominators. **`eq(α_i,b)` can be zero** if
+   any `α_j ∈ {0,1}`; the Rust calls `.invert().unwrap()` and would panic. Go must
+   return a named error instead — and a test must feed `α_j = 0` and `α_j = 1` to
+   confirm it does.
+
+   **Resolved (user):** the boundary is avoidable and an error is the right
+   behaviour. Titan does eventually need evaluations at points with `{0,1}`
+   coordinates, but sum-check aggregates those into a *single random point*
+   evaluation before the group sum-check runs. So `α` reaching this primitive is
+   Fiat–Shamir-derived, and a boolean coordinate has negligible probability. The
+   error is therefore defensive — unreachable on the honest path, never a case
+   needing an alternate formula. Document it as such so a future caller does not
+   read the error as a supported input mode.
+4. `computeSTables(f GroupPoly, alpha []fr.Element, ell int)` — `S_ℓ` via transposed
+   MSMs, then the additive descent.
+5. `roundMessages` — the `H0`/`H1` split, for `u ∈ {0,1,2}`.
+6. `ProveGroupEval` / `VerifyGroupEval` — Fiat-Shamir via `csp.Transcript` with its
+   own domain separator, matching how `crypto/sumcheck` does it. Absorb `m`, `ℓ`,
+   `α`, `σ` up front (the Rust binds `m`, `ℓ`, `α`, `σ`; keep that).
+
+**The Rust verifier is not a usable reference.** `run_verifier_noninteractive`
+(`group_sumcheck.rs:301`) is incomplete: its final check is
+`let final_eval = PallasPoint::identity(); //evaluate_f_at_r(f_table, &r_vec);` —
+the real evaluation is commented out, so the check compares against the identity
+and the test has the verifier call commented out as well. It also loops `for i in
+1..m`, one round short of `m`. **The Go verifier is written from the paper**, and it
+must close the reduction properly: the final claim is discharged against
+`f̃(r)·eq(α,r)`, which for the PCS comes from the WHIR oracle. Until WHIR lands
+(step 3+), `VerifyGroupEval` returns the residual claim for the caller to close —
+the same reduce-not-close contract as `crypto/sumcheck`, and it must be documented
+as loudly.
+
+**How it gets verified:**
+- Round-trip for `m ∈ {2,4,6,8,10}`, `ℓ = m/2`, against `σ` computed by direct MSM
+  evaluation of `f̃(α)`.
+- **Cross-check against the existing general sum-check.** Build the same claim as a
+  two-factor product (`eq` as a `FieldPoly`, `f̃` as the `GroupPoly`) and run
+  `sumcheck.Prove`; the two must agree on the sum and the residual. This is the
+  strongest available test — an independent implementation of the same claim.
+- **`ℓ` invariance**: the result must not depend on `ℓ`. Run `ℓ = 0` (all folklore),
+  `ℓ = m/2`, `ℓ = m` (all MSM) and require identical output. This catches errors in
+  the `S`-table path that a single `ℓ` would hide.
+- Negative cases: tampered round message, wrong `σ`, `α` of wrong length, and a
+  compensating tamper preserving `g(0)+g(1)`.
+- Mutation testing to confirm non-vacuity, as done for `crypto/sumcheck`.
+
+## Deferred, with reasons
+
+- **Merkle oracle — gnark-crypto's tree cannot be used as the builder.**
+  `accumulator/merkletree` is a *streaming* tree from NebulousLabs (Sia), built for
+  storage proofs over data read once from disk. It **does not store the leaves**:
+  `Push`'s own doc says it keeps "only the log(n) elements necessary to build the
+  Merkle root and ... a proof that a piece of data is in the tree"
+  (`tree.go:201-204`). Internally it is a stack of subtree roots, merged on the fly
+  by `joinAllSubTrees`.
+
+  Hence `SetIndex`: it names, *in advance*, the one leaf a proof will later be
+  wanted for, so that `Push` can capture it as it streams past
+  (`tree.go:209-211`) and the joins can capture that path's siblings. It must be
+  called on an empty tree (`tree.go:319-321`) because after any `Push` the data for
+  every other index is already discarded, and `Prove` panics if it was never
+  called. `PushSubTree` does not help — it explicitly forbids the subtree holding
+  the proof index (`tree.go:254-259`).
+
+  So `t` openings would mean `t` full rebuilds: `n·t` leaf hashes instead of `n`.
+  At `n = 2^16`, `t = 100` that is ~6.5M leaf hashes vs 65k, and each leaf here is
+  a serialized G1 point (or a coset of them), so re-serialization is paid too. Not
+  broken — correct and RFC 6962 conformant for its intended streaming job — but
+  the opposite trade from what WHIR needs (many openings, small in-memory tree).
+
+  **Decision:** write a plain in-memory tree (~60 lines) that retains every level,
+  making any number of openings pointer walks. Titan's trees are small by design
+  (`O(√n)` leaves, smaller still under the `⁴√n` variant), so holding all levels
+  is cheap. This also makes path compression — shared upper nodes across query
+  paths, which the paper's implementation exploits — expressible later, whereas
+  the streaming tree cannot represent it at all. Reuse gnark-crypto's
+  `VerifyProof` and its `leafSum`/`nodeSum` domain separation so the hash format
+  stays compatible and audited; replace only the builder. Path compression is out
+  of scope for the first cut, per the scope decision.
+- **WHIR folding, CSP eval, full `Commit`/`Eval`.** Need steps 1–2 first.
+- **`O(⁴√n)` optimisations.** Explicitly deferred per the scope decision.
+- **Zero-knowledge.** The paper's implementation is not ZK; hiding would come from
+  hiding Pedersen commitments in the inner layer.
 
 ## Implementation Progress
 
-- [x] Done — 1. `errors.go` — 14 sentinels via stdlib `errors.New`, matching the
-  convention in `rp/csp/errors.go`; construction and wrapping use the fsc errors
-  package as AGENTS.md requires.
-- [x] Done — 2. `poly.go` — `FieldPoly`/`GroupPoly` plus the conversion boundary
-  (`NewFieldPoly`, `NewGroupPoly`, `toZr`, `fromZr`, `toG1`) and the fold. The group
-  fold builds all differences first and scales them with a single `scaleByOne`, which
-  hoists the `fr.Element -> big.Int` conversion out of the per-element loop. That one
-  change took the fold from 300 ms to 190 ms and is what makes the raw-type path beat
-  `mathlib` at all.
-- [x] Done — 3. `prover.go` — `Prove`, `ProveWithTranscript`, shared `proveWith`.
-  Round evaluations step `t` by slope addition (no multiplication); the group path
-  gathers scalars and points per evaluation point and applies one MSM. `Opening`
-  restated with an explicit `Product` field after the prover/verifier asymmetry
-  surfaced (see Notes).
-- [x] Done — 4. `verifier.go` — `Shape`, `Verify`, `VerifyWithTranscript`. Per round:
-  length check, decode and absorb, `q(0)+q(1) == expected`, squeeze, interpolate.
-  Cost is independent of hypercube size.
-- [x] Done — 5. completeness tests — 27 `TestProveVerify*` subtests across
-  `k ∈ {0..3}` × `mu ∈ {1,2,3,6,8,10}`, brute-force sum cross-check,
-  input-immutability assertions, and `TestGroupMatchesFieldScaled` cross-checking the
-  group protocol against the field one through the discrete logs.
-- [x] Done — 6. soundness/negative tests — 38 subtests, including the compensating
-  tamper that preserves `q(0)+q(1)` and must still fail via interpolation. Verified
-  non-vacuous by mutation testing: reversing the fold's subtraction order and dropping
-  the group `AddMixed` each produce a failure. Coverage 87.0%.
-- [x] Done — 7. fuzz targets + nightly-fuzz.yml entries — `FuzzVerify` (attacker
-  controlled proof bytes) and `FuzzNewFieldPoly` (arbitrary evaluation tables).
-  30 s local runs: 3.66M and 2.93M execs, no crashes. Registered as
-  `zkatdlog-sumcheck-verify` and `zkatdlog-sumcheck-field-poly`.
-- [x] Done — 8. `docs/` page — `docs/crypto/sumcheck.md`, linked from `docs/README.md`
-  under a new "Cryptographic Primitives" heading. Leads with the reduce-not-close
-  caveat, and carries both measurement tables.
+- [x] Done — 1. `encode.go` + `domain.go` + `errors.go`: `Domain`, `reverseBits` /
+  `bitReversePermutation`, `EncodeGroupOracle`, `EncodeFieldOracle`.
+  Tests in `encode_test.go`, benchmarks in `encode_bench_test.go`.
+  **98.1% statement coverage, race-clean, `go vet` clean.** Six mutations each
+  independently fail the suite (see `docs/crypto/titan.md` §9). Docs written and
+  linked from `docs/README.md`.
+- [ ] Pending — 2. `groupsumcheck.go`: `foldFirst`, `eqTable`, `batchInvert` with a
+  real zero-denominator error, `computeSTables`, `roundMessages`, `ProveGroupEval` /
+  `VerifyGroupEval`, with cross-check against `crypto/sumcheck` and `ℓ`-invariance.
 
 ## Notes & Decisions
 
-- **No new dependencies.** Investigated both candidates and rejected them:
-  - gnark-crypto v0.20.1 has **no hash-based multilinear PCS**. FRI is its only
-    hash-based scheme and it is univariate (`Open(p, position uint64)` opens at
-    an index, not at a point in F^mu). `ecc/bls12-381/fr/polynomial.MultiLin` is
-    arithmetic only, no commitment. No Ligero/Brakedown/Basefold/WHIR/Hyrax.
-  - gnark v0.16.3 has two sum-check implementations, both unusable:
-    `std/recursion/sumcheck` is an in-circuit **verifier** only (its own doc.go:
-    "We do not yet expose prover"), with the prover path on `*big.Int`;
-    `internal/gkr/bls12-381` is the right shape but under `internal/`, so it
-    cannot be imported — confirmed with a real build error, not inferred:
-    `use of internal package ... not allowed`. It is also generated code, fully
-    unexported, GKR-specialized, and single-threaded by its own admission.
-  - Adding gnark would pull ~7 transitive deps into a production token SDK for
-    zero reuse.
-- Reusable from gnark-crypto: `polynomial.MultiLin` (`Fold`, `Sum`, `Evaluate`,
-  `Eq`, `EvalEq`, `NumVars`), `Polynomial.InterpolateOnRange`, `Pool`, plus
-  `bls12381.G1Affine/G1Jac/MultiExp`.
-- Borrowed conceptually from gnark's internal transcript: never reset the hash
-  between rounds. `csp.Transcript` already has this property.
-- MSM size dispatch: follow the benchmarked crossovers already documented in
-  `rp/csp/msm.go` — plain `Mul` ~2.5x faster than `MultiScalarMul` at n=1,
-  `Mul2` ~25% faster at n=2, `MultiScalarMul` wins from n>=3.
-- **`Evaluate` split into `EvaluateOpening` and `EvaluatePoint`** (user request).
-  Two orderings are in play: *table order* (`b_0` first, the layout documented on
-  `FieldPoly`) and *folding order* (`b_{mu-1}` first, the order rounds consume
-  challenges and the order `Opening.R` is already in). A single `Evaluate` had to pick
-  one silently — it took folding order — so a caller holding a table-order point got a
-  wrong value with no error. Now `EvaluateOpening` takes folding order and passes `R`
-  straight through; `EvaluatePoint` takes table order and reverses internally via
-  `reverseScalars` (which copies, so a caller's slice is never disturbed). The method
-  name states the convention at the call site.
-- **The fold comments were wrong; the arithmetic was right.** The user flagged that
-  `fold` was documented as substituting the *first* variable, which would require an
-  even/odd (`2i`, `2i+1`) pairing rather than the halves pairing (`i`, `i+half`) the
-  code uses. Resolved empirically in both directions: a probe showed `p = b_0` folds to
-  `[0, 1]` (untouched) and `p = b_1` to `[5, 5]` (constant at `r`), so `fold`
-  substitutes the **last** variable — correct for the little-endian table, where
-  `b_{mu-1}` is the high bit. Substituting the even/odd pairing as a mutation made the
-  suite fail with `round consistency check failed`. So the docs were corrected, not the
-  code. `TestFoldSubstitutesLastVariable` now pins the convention, because prover and
-  verifier fold identically and a convention error cancels between them — no
-  round-trip test can catch it.
-- Target path note: the request said `nogh/crypto`, which does not exist. The
-  crypto packages live under `nogh/v1/crypto` (siblings `common`, `math`, `rp`,
-  `upgrade`), so the package goes there. Confirmed by the user as intended.
+- Errors: sentinel `errors.New` + fsc `errors.Wrapf`, never `fmt.Errorf`, matching
+  `crypto/sumcheck/errors.go` and the AGENTS.md rule.
+- Transcript: reuse `csp.Transcript` with a `Titan-v1`-style domain separator.
+- No new dependencies. gnark-crypto v0.20.1 supplies `fr`, `bls12381`, `MultiExp`
+  and `accumulator/merkletree`; everything else is in-repo.
+- Fuzz targets required by AGENTS.md for any parsing entry point, wired into
+  `.github/workflows/nightly-fuzz.yml`.
+- Docs: `docs/crypto/titan.md`, linked from `docs/README.md` under the existing
+  "Cryptographic Primitives" heading, before either step is marked complete.
 
-## Status
+### Decisions taken during step 1
 
-✅ COMPLETE — all 8 steps done. Package builds, `go vet` and `gofmt` clean, full
-suite passing (27 completeness + 38 soundness/validation subtests, 87.0% statement
-coverage), both fuzz targets exercised locally and registered in CI, docs published
-and linked.
-
-Verification commands:
-
-```bash
-go test ./token/core/zkatdlog/nogh/v1/crypto/sumcheck/ -cover
-go test ./token/core/zkatdlog/nogh/v1/crypto/sumcheck/ -run='^$' -fuzz='^FuzzVerify$' -fuzztime=30s
-go test ./token/core/zkatdlog/nogh/v1/crypto/sumcheck/ -run='^$' -fuzz='^FuzzNewFieldPoly$' -fuzztime=30s
-```
-
-Post-completion revisions (see Notes & Decisions): the `fold` doc comments were
-corrected to say *last* variable, and `Evaluate` was split into `EvaluateOpening` /
-`EvaluatePoint`. Re-verified after both: `gofmt` and `go vet` clean,
-`go test -race -cover` passing at 86.9% of statements.
-
-Not committed: no git operations performed, per the "never push without explicit
-go-ahead" rule in AGENTS.md.
+- **`Domain` wraps `fft.NewDomain` for the root of unity, then materializes the
+  `2^d` powers.** The butterfly indexes the domain at power-of-two strides, so it
+  wants an explicit slice (this is what the Rust `multilinear_fft(domain: &[F])`
+  signature implies too). `fft.Domain`'s precomputed twiddles are laid out for its
+  own FFT, not for this access pattern, so only `Generator` is reused.
+- **`fft.NewDomain` panics past two-adicity rather than erroring** (verified:
+  `m (8589934592) is too big: the required root of unity does not exist`). So
+  `NewDomain` bounds `logSize` by `MaxLogDomainSize = 32` *before* calling it and
+  returns `ErrDomainTooLarge`. Also verified the generator is primitive, not a
+  lower-order element: `g^card == 1` while `g^(card/2) != 1`.
+- **The encoders take `sumcheck.FieldPoly` / `sumcheck.GroupPoly`** rather than
+  declaring parallel types, so a polynomial can be committed and sum-checked with
+  no conversion. This is also what lets the naive cross-check reuse the
+  independently-tested `EvaluatePoint`, so the two sides of the test share no code.
+- **Group butterfly works in Jacobian coordinates** and converts to affine once at
+  the end, since the inner loop is add/sub-heavy and affine addition is the more
+  expensive form.
+- **Deferred, deliberately: batching the butterfly by root.** Measured 10240 scalar
+  mults for `m=10, d=11` (matching `(n/2)·log n`), and the early passes reuse very
+  few distinct roots (pass 0: 2 roots over 1024 nodes). Grouping each pass by root
+  into one MSM per root would amortize window precomputation. Output-identical, so
+  it is a tuning change; kept out of the first cut to stay verifiable against the
+  reference. Recorded in `docs/crypto/titan.md` §7.1.
+- **No fuzz target yet** — the package has no parsing/deserialization entry point
+  so far. One is owed when proof deserialization lands, and must be added to
+  `.github/workflows/nightly-fuzz.yml` at that point.
+- **`make lint` was not run**: `golangci-lint` is not installed in this
+  environment. `gofmt -l` and `go vet` are clean; the lint gate still needs to run
+  before a PR.
