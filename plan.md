@@ -1,359 +1,358 @@
-# Plan: Titan multilinear PCS — steps 1 and 2
+# Plan: Titan multilinear PCS — step 3 (Merkle-committed group oracle) — ✅ COMPLETE
+
+Steps 1 and 2 are complete and committed (`ccc7e99d`, `3dd550d8`). Their plan is
+preserved at `git show 3dd550d8:plan.md`; the decisions taken there are summarised
+in `docs/crypto/titan.md`. **This plan covers step 3 only.**
 
 ## Goal
 
-Port the Titan polynomial commitment scheme (Kamath, Prakash, Samanta, Sekar,
-Singh — *Titan: Efficient Polynomial Commitments from IOPs over Groups*) from the
-Rust reference at `~/IdeaProjects/titan-implementation` to Go over BLS12-381 G1.
+Commit a group multilinear `G̃` as a Merkle-rooted Reed-Solomon codeword, giving a
+queryable oracle `⟦G⟧`, and expose the two-tier `Commit` that turns a *field*
+multilinear into that same object.
 
-Titan commits a field multilinear in two tiers: Pedersen-commit the rows of the
-`q × q` matrix form of `f̃`, interpolate the resulting `q` group elements into a
-group multilinear `G̃`, then commit `G̃` with a WHIR-style IOPP over groups. The
-reason for choosing it here is that **a group polynomial commitment falls out as a
-by-product** — the inner oracle `⟦G⟧` *is* a commitment to a group multilinear, so
-one scheme serves both the field and group cases zkatdlog needs.
+The user's framing for this step: *"build the merkle tree, and encode G as a
+codeword, and merkle-commit it. We get both things: field poly commitment and group
+poly commitment."* That is exactly right, and it is the reason Titan was chosen —
+**one commitment mechanism, two entry points**:
 
-Design reference: `~/IdeaProjects/titan/eprint_version` (most detailed version).
-Rust reference: `~/IdeaProjects/titan-implementation` (Pasta curves, ~6.4k lines).
+    CommitGroup(G̃)  -> Commitment        // tier 2 only
+    CommitField(f̃)  -> Commitment, aux   // tier 1 (Pedersen rows) then tier 2
 
-**This plan covers steps 1 and 2 only**, per the user's instruction to plan before
-coding. Later steps (Merkle coset oracle, WHIR folding, CSP eval, full PCS) get
-their own plan once these land.
+Both land on the same `Commitment` type, so everything downstream (WHIR folding,
+CSP eval) is written once.
 
-## Scope decisions (fixed by the user)
+**What this step does NOT do.** It commits and opens *positions* of the codeword
+with Merkle proofs. It does not fold (WHIR rounds), and it does not prove an
+*evaluation* of `f̃` or `G̃`. So after step 3 the object is binding and queryable but
+not yet a working PCS — `Eval` is step 4. Stating this because "commitment" is easy
+to read as "PCS done", and it is not.
 
-1. **The existing `crypto/sumcheck` package stays as it is.** Efficient group
-   sum-check is *not* a replacement for it. It applies only to the specialised form
-   `Σ_x eq(α,x)·f̃(x) = σ` corresponding to an *evaluation claim*, and is only
-   worthwhile when `f̃` is a **group** polynomial. It is an additional primitive
-   used inside the Titan PCS eval path, not a general-purpose sum-check.
-2. **New sibling package**, not an extension of `crypto/sumcheck`.
-3. **Target the simplified `O(√n)` variant first.** The `O(⁴√n)` optimisations
-   (coset-wise Merkle leaves, early CSP termination with folded generators) layer
-   on afterwards.
-4. **Merkle tree: adapt gnark-crypto's `accumulator/merkletree`.** The arkworks
-   tree the Rust uses is heavily templatised and supports path compression; the
-   first cut does **not** need path compression.
-5. Commit on the existing `sumcheck` branch.
+## What already exists (do not rebuild)
 
-## Target location
-
-    token/core/zkatdlog/nogh/v1/crypto/titan
-
-Sibling of `sumcheck`, `rp`, `math`, `common`, `upgrade` under `nogh/v1/crypto`,
-matching where the existing crypto packages live.
-
-## Curve portability — checked, not assumed
-
-| Property | Pasta (Pallas `Fq`) | BLS12-381 `Fr` | Consequence |
-|---|---|---|---|
-| Two-adicity | 32 | **32** | smooth domain `L ⊆ F` ports directly; `2^32` max in both |
-| Scalar field bits | ~255 | ~255 | same |
-| Base field bits | ~255 | **~381** | G1 elements are larger; MSM slower per element |
-| Pairing | none | yes (unused) | we pay G1 size for a feature Titan does not need |
-
-The two-adicity match is the load-bearing fact: WHIR folding needs a smooth
-multiplicative subgroup `L` of size `2^d`, and BLS12-381 `Fr` supports exactly the
-same `d ≤ 32` as Pallas. So no domain-construction redesign is needed. Verified by
-factoring `r - 1` for both fields rather than trusting the curve documentation.
-
-## Indexing convention — the same as ours
-
-The Rust indexes multilinear coefficients as
-`coeffs[b_1 + 2·b_2 + … + 2^{m-1}·b_m]` (`utils.rs:311`), i.e. variable 1 at the
-LSB. **This is the same little-endian convention as our Go `FieldPoly`**, so
-`GroupPoly`/`FieldPoly` tables port index-for-index with no relabelling.
-
-One wrinkle to carry carefully: the Rust has **two** folds —
-
-| Rust | pairing | substitutes |
+| Piece | Where | Status |
 |---|---|---|
-| `MultilinearPoly::fold` (`multilinear.rs:49`) | `i`, `i + n/2` | **last** variable |
-| `MultilinearPoly::fold_first` (`multilinear.rs:69`) | `2i`, `2i+1` | **first** variable |
+| Smooth domain `L`, `\|L\| = 2^d` | `domain.go` `NewDomain` | done, step 1 |
+| Codeword `{Ĝ(x) : x ∈ L}` | `encode.go` `EncodeGroupOracle` | done, step 1 |
+| Field-side codeword | `encode.go` `EncodeFieldOracle` | done, step 1 |
+| Group sum-check (eval path) | `groupsumcheck.go` | done, step 2 |
+| Pedersen row commit | — | **step 3, new** |
+| Merkle tree over G1 leaves | — | **step 3, new** |
 
-and `group_sumcheck.rs` uses **`fold_first`** in its tail rounds. Our Go
-`fold` is the *last*-variable one (pinned by `TestFoldSubstitutesLastVariable`).
-So the port needs an explicit first-variable fold; it must be a **new function**,
-not a change to the existing one. See step 2.
+So the encoder is already there. Step 3 is the tree, the leaf serialization, and the
+two-tier `Commit` that wires them to the encoder.
 
-Separately, `multilinear_fft` bit-reverses before the butterfly precisely to
-reconcile the two (`utils.rs:340-343`). That reconciliation has to be ported
-verbatim or the encoding is silently wrong — see step 1.
+## Scope decision revised: gnark-crypto's tree cannot be reused at all
 
-## Step 1 — Group oracle encoding (`encode.go`)
+The step-1 plan said: *"Reuse gnark-crypto's `VerifyProof` and its
+`leafSum`/`nodeSum` domain separation so the hash format stays compatible and
+audited; replace only the builder."* **The second half of that is now withdrawn.**
+Two things were checked in the actual v0.20.1 source and both fail:
 
-Ports §"Encoding Group Oracle" of the eprint and `multilinear_fft` from
-`utils.rs:326`. The paper says this "ports nearly as is", and it does.
+1. **The domain separation does not exist.** `leafSum` and `nodeSum`
+   (`tree.go:92-106`) read, verbatim:
 
-**What it computes.** Given a group multilinear `G̃ ∈ G[X_1..X_m]` in evaluation
-basis (our `GroupPoly`) and a smooth domain `L ⊆ F` with `|L| = 2^d`, `d ≥ m`,
-produce the Reed-Solomon codeword `{Ĝ(x) : x ∈ L}` where
+       func leafSum(h hash.Hash, data []byte) []byte {
+           //return sum(h, leafHashPrefix, data)
+           return sum(h, data)
+       }
+       func nodeSum(h hash.Hash, a, b []byte) []byte {
+           //return sum(h, nodeHashPrefix, a, b)
+           return sum(h, a, b)
+       }
 
-    Ĝ(X) = G̃(X, X^2, X^4, …, X^(2^(m-1)))
+   The RFC 6962 `0x00`/`0x01` prefixes survive only in the doc comments and in a
+   comment inside `VerifyProof`; `grep` finds no declaration of `leafHashPrefix` or
+   `nodeHashPrefix` anywhere in the package. So the tree computes `H(data)` and
+   `H(l‖r)` with **no leaf/node separation**, which is the textbook
+   second-preimage weakness: a two-leaf tree's root is indistinguishable from a
+   one-leaf tree whose leaf is that root. Adopting this hash format to "stay
+   compatible" would mean adopting the weakness.
+2. **`VerifyProof` is not reusable anyway.** It is hardcoded to the streaming
+   tree's orphan-merging shape (subtree completeness, `stableEnd`, orphan
+   elevation — `verify.go:84-140`), which is a different tree shape from a plain
+   power-of-two tree. And it takes a single `proofIndex`, so it cannot express the
+   batch openings WHIR needs.
 
-**How, and why it is cheap.** Never form `Ĝ` explicitly. Use the recursion
+Both `leafSum`/`nodeSum` are unexported, so they could not be called even if we
+wanted them.
 
-    G̃(x, x², …) = (1-x)·G̃(0, x², …) + x·G̃(1, x², …)
+**Revised decision: write the tree and the verifier, with real domain separation.**
+Both sides are ours, `0x00`/`0x01` prefixes actually applied. This is ~120 lines
+rather than ~60, and it is the honest cost of not inheriting a known weakness.
+The builder-only reuse was already ruled out in step 1 for the streaming reason
+(no stored leaves ⇒ `t` openings = `t` rebuilds); this adds the verifier to that.
+Domains always power-of-two here (`|L| = 2^d`), so the shape is the simple one and
+no orphan logic is needed.
 
-as a butterfly over `L`, consuming the hypercube evaluations `G_1..G_n` directly at
-the final layer. Costs `(n/2)·log n` scalar multiplications against `≈ n·log n` to
-build `Ĝ` explicitly.
+## Leaf layout: coset-wise from the start, `k = 0` for the first cut
 
-**Sub-items:**
+The Rust reference's Merkle config is `Leaf = Vec<G>` — **a coset of group elements
+per leaf**, not one point (`group_whir_committer.rs:102`, `src/merkle_tree/sha256.rs`
+hashes a `Vec<C>` by concatenating serialized points). `GroupWhirCommitment::new`
+takes a folding dimension `k` and builds `2^k` points per leaf
+(`group_whir_committer.rs:257-285`).
 
-1. `Domain` type: a smooth multiplicative subgroup of `Fr` of size `2^d`, built
-   from a generator of the `2^32`-torsion. Reject `d > 32` with a named error, and
-   reject `d < m`.
-2. `reverseBits` / `bitReversePermutation` — port of `utils.rs:296-322`.
-3. `EncodeGroupOracle(p GroupPoly, dom *Domain) ([]bls12381.G1Affine, error)` —
-   the butterfly of `utils.rs:326`, including the **bit-reversal before** the
-   butterfly and the `d > m` blow-up (each coefficient repeated `2^(d-m)` times).
-4. A field-side `EncodeFieldOracle` for the generator polynomial `g̃` (commit step
-   4 of the paper gives the verifier `⟦g⟧`; generators are public).
+That coset structure is the `O(⁴√n)` optimisation, which is **deferred** per scope
+decision 3. But the deferral is only about *choosing* `k > 0`; the leaf **type**
+must be coset-shaped now, because retrofitting it later changes every Merkle root
+and every proof format. So:
 
-**How it gets verified — this is the part that matters.** The butterfly is exactly
-the kind of code that passes a round-trip test while computing the wrong thing, so:
-- **Direct cross-check**: for small `m` (1..8), compute `Ĝ(x)` for every `x ∈ L` by
-  naive evaluation of `G̃(x, x², …, x^(2^(m-1)))` using our existing
-  `GroupPoly.EvaluatePoint`, and require equality with the butterfly output. This
-  is an independent implementation, not a re-derivation.
-- **Degree check**: the output must be a codeword of `RS[G, L, m]`. With `d > m`,
-  inverse-FFT the result and assert coefficients above `2^m` are zero.
-- **Bit-reversal mutation**: deleting the `bitReversePermutation` call must make
-  the cross-check fail. If it does not, the test is not exercising the ordering and
-  the convention is unpinned.
+- `Leaf` is `[]bls12381.G1Affine` from the start, hashed as the concatenation of
+  serialized points.
+- The first cut sets `k = 0`, i.e. one point per leaf. Identical roots to a
+  scalar-leaf design, but the type does not change when `k > 0` arrives.
+- The `k > 0` remodel/transpose from `group_whir_committer.rs:259-266` is **not**
+  ported yet; the plan records where it goes.
 
-## Step 2 — Efficient group sum-check (`groupsumcheck.go`)
+This is a deliberate departure from "simplest thing that works", justified by the
+format-stability cost. Recorded as a decision, not smuggled in.
 
-Ports §"Efficient Group Sumcheck" + §"Computing round messages in group sumcheck"
-and `group_sumcheck.rs`. **Additive to `crypto/sumcheck`, which is untouched.**
+## Serialization: compressed, and it must be pinned by a test
 
-**The claim form.** Only this shape, and only for a group `f̃`:
+A leaf hash is over serialized G1 points, so the byte encoding is part of the
+commitment. gnark-crypto offers `Bytes()` (48-byte compressed) and
+`RawBytes()` (96-byte uncompressed).
 
-    Σ_{x ∈ {0,1}^m} eq(α, x) · f̃(x) = σ,   f̃ ∈ G, σ ∈ G
+**Choose compressed `Bytes()`.** Halves the hashed volume, and leaves are the bulk
+of the hashing. The cost is a decompression per point on the verify side, which the
+verifier already pays elsewhere. Fix it with a test asserting the exact leaf byte
+length (48 per point) and a known-answer root, so a future switch to `RawBytes()`
+cannot happen silently.
 
-This is an *evaluation* claim: `σ = f̃(α)`. The specialisation is what buys the
-speedup — the general `crypto/sumcheck` cannot exploit it.
+**The infinity point needs checking, not assuming.** `Bytes()` on the identity must
+produce a distinct, fixed encoding; if it produced all-zeros indistinguishably from
+some other state that would be a binding problem. Verify empirically before relying
+on it — do not trust the doc comment.
 
-**Why it is faster.** Naive group sum-check costs `O(n)` group exponentiations.
-This variant costs `√n` MSMs of size `√n` plus `O(√n)` group-exp — the paper notes
-an optimised Pippenger MSM is 20–50× faster than the equivalent exponentiations,
-and our own measurement on the existing package agrees that scalar multiplication
-is ~85% of a group fold.
+## Step 3 sub-items
 
-**Mechanism.** With `ℓ = m/2`, precompute partial-sum tables
+### 3.1 `merkle.go` — the tree
 
-    S_i(b) = Σ_{x ∈ {0,1}^(m-i)} h̃(b, x),   h̃(x) = eq(α,x)·f̃(x)
+    type Tree struct { levels [][][]byte; leafSize int }   // levels[0] = leaf hashes
+    func BuildTree(leaves [][]bls12381.G1Affine) (*Tree, error)
+    func (t *Tree) Root() []byte
+    func (t *Tree) Prove(index int) (*MerkleProof, error)
+    func (t *Tree) ProveBatch(indices []int) (*BatchProof, error)
+    func VerifyMerkleProof(root []byte, leaf []bls12381.G1Affine, proof *MerkleProof) bool
 
-- `S_ℓ` costs `2^ℓ` MSMs of size `2^ℓ`. Requires a **transpose** of both the `eq`
-  and `f` tables so each slice is contiguous (`compute_Sl_poly`, `group_sumcheck.rs:37-52`).
-- `S_(i-1)(b) = S_i(b,0) + S_i(b,1)` — each lower table is `2^i` group *additions*,
-  which our measurements put at ~137× cheaper than scalar mults.
-- Round messages for `i ≤ ℓ` come from an MSM of size `O(2^i)` over `S_i`:
+- Retains **every level**, so an opening is a pointer walk: `t` openings cost `t·d`
+  hash-free slice reads plus `t·d` verify-side hashes, against the streaming tree's
+  `n·t` leaf hashes. At `n = 2^16, t = 100`: ~65k leaf hashes once, vs ~6.5M.
+- `hashLeaf(points) = SHA256(0x00 ‖ p_0.Bytes() ‖ … ‖ p_{2^k-1}.Bytes())`
+- `hashNode(l, r)   = SHA256(0x01 ‖ l ‖ r)`
+- Leaf count must be a power of two (guaranteed: it is `|L| / 2^k`). Reject
+  otherwise with `ErrNotPowerOfTwo` rather than padding — padding is a silent
+  soundness footgun and we never need it.
+- Reject a ragged `leaves` slice (unequal coset sizes) with a named error; this is
+  the shape error that would otherwise produce a valid-looking root over
+  inconsistent data.
+- `ProveBatch` returns per-index paths in the first cut. Path compression (dedup of
+  shared upper nodes, what the Rust's `MultiPath` does) is **deferred**, but
+  `BatchProof` is a struct from day one so adding a compressed representation later
+  does not change the call sites.
 
-      g_i(u) = Σ_{b ∈ {0,1}^i} [ eq(z,b)·eq(z,α_i) / eq(α_i,b) ] · S_i(b)
+### 3.2 `commit.go` — tier 1 and the two-tier entry point
 
-  The Rust further isolates the `u`-dependent part into two MSMs `H0`, `H1` of size
-  `2^(i-1)` plus scalar factors (`compute_gi_values`), so the three evaluations
-  `u ∈ {0,1,2}` share the MSM work. Port that optimisation; it is not in the paper
-  text but is a clear win.
-- For `i > ℓ` the polynomial is down to `O(√n)` and rounds are computed the
-  folklore way — **this is where the tail uses a first-variable fold**, per the
-  convention note above.
+    type Commitment struct { Root []byte; NumVars, LogDomain, K int }
+    type GroupOpeningHint struct { Codeword []bls12381.G1Affine; Tree *Tree; G sumcheck.GroupPoly }
+    type FieldOpeningHint struct { GroupOpeningHint; Rows sumcheck.FieldPoly; Q int }
 
-**Round degree is 2, not 1.** `h̃ = eq · f̃` is a product of two multilinears, so
-`g_i` is quadratic and needs three evaluations `u ∈ {0,1,2}` — hence
-`eval_triple_at_alpha` doing Lagrange interpolation on three points.
+    func CommitGroup(G sumcheck.GroupPoly, dom *Domain, k int) (*Commitment, *GroupOpeningHint, error)
+    func CommitField(f sumcheck.FieldPoly, gens []bls12381.G1Affine, dom *Domain, k int) (*Commitment, *FieldOpeningHint, error)
 
-**Sub-items:**
+`CommitGroup` = `EncodeGroupOracle` → chunk into `2^k`-cosets → `BuildTree`.
 
-1. `foldFirst` on `GroupPoly` and `FieldPoly` — first-variable fold, `2i`/`2i+1`.
-   New function; the existing last-variable `fold` is not touched. Doc must state
-   which is which and why both exist, mirroring the existing `fold` comment.
-2. `eqTable(alpha)` — the `eq` evaluation table (`init_with_eq`, `multilinear.rs:27`).
-   Check whether `rp/csp` already has one before writing a second.
-3. `batchInvert` for the `1/eq(α_i,b)` denominators. **`eq(α_i,b)` can be zero** if
-   any `α_j ∈ {0,1}`; the Rust calls `.invert().unwrap()` and would panic. Go must
-   return a named error instead — and a test must feed `α_j = 0` and `α_j = 1` to
-   confirm it does.
+`CommitField` adds tier 1 in front:
+- `n = 2^m` coefficients as a `q × q` matrix, `q = 2^ceil(m/2)`. **Odd `m` needs a
+  decision, not a silent floor**: `m = 2s+1` gives a `2^(s+1) × 2^s` matrix. Take
+  rows `= 2^(s+1)`, so the group multilinear has `s+1` variables and row MSMs are
+  length `2^s`. Assert `rows·cols == n` so the two cannot drift.
+- Row `j` → `G_j = Σ_k f[j·cols + k] · gens[k]`, one MSM of length `cols`. Reuse the
+  existing `msm` helper from `multilinear.go`.
+- The `q` results **are** the evaluation table of `G̃` — no interpolation step; the
+  little-endian table convention already makes `G_j` the value at `⟨j⟩`. Worth a
+  comment, because "interpolate" in the paper's prose sounds like work that isn't
+  there.
+- `gens` must have length `≥ cols`; reject otherwise. Generator provenance is the
+  caller's (a real setup, not derived here) — `Setup` is out of scope for this step.
 
-   **Resolved (user):** the boundary is avoidable and an error is the right
-   behaviour. Titan does eventually need evaluations at points with `{0,1}`
-   coordinates, but sum-check aggregates those into a *single random point*
-   evaluation before the group sum-check runs. So `α` reaching this primitive is
-   Fiat–Shamir-derived, and a boolean coordinate has negligible probability. The
-   error is therefore defensive — unreachable on the honest path, never a case
-   needing an alternate formula. Document it as such so a future caller does not
-   read the error as a supported input mode.
-4. `computeSTables(f GroupPoly, alpha []fr.Element, ell int)` — `S_ℓ` via transposed
-   MSMs, then the additive descent.
-5. `roundMessages` — the `H0`/`H1` split, for `u ∈ {0,1,2}`.
-6. `ProveGroupEval` / `VerifyGroupEval` — Fiat-Shamir via `csp.Transcript` with its
-   own domain separator, matching how `crypto/sumcheck` does it. Absorb `m`, `ℓ`,
-   `α`, `σ` up front (the Rust binds `m`, `ℓ`, `α`, `σ`; keep that).
+`Commitment` carries `NumVars`, `LogDomain`, `K` alongside the root because the
+verifier needs them to interpret proofs, and a root alone is ambiguous across
+parameter choices.
 
-**The Rust verifier is not a usable reference.** `run_verifier_noninteractive`
-(`group_sumcheck.rs:301`) is incomplete: its final check is
-`let final_eval = PallasPoint::identity(); //evaluate_f_at_r(f_table, &r_vec);` —
-the real evaluation is commented out, so the check compares against the identity
-and the test has the verifier call commented out as well. It also loops `for i in
-1..m`, one round short of `m`. **The Go verifier is written from the paper**, and it
-must close the reduction properly: the final claim is discharged against
-`f̃(r)·eq(α,r)`, which for the PCS comes from the WHIR oracle. Until WHIR lands
-(step 3+), `VerifyGroupEval` returns the residual claim for the caller to close —
-the same reduce-not-close contract as `crypto/sumcheck`, and it must be documented
-as loudly.
+### 3.3 `errors.go` additions
 
-**How it gets verified:**
-- Round-trip for `m ∈ {2,4,6,8,10}`, `ℓ = m/2`, against `σ` computed by direct MSM
-  evaluation of `f̃(α)`.
-- **Cross-check against the existing general sum-check.** Build the same claim as a
-  two-factor product (`eq` as a `FieldPoly`, `f̃` as the `GroupPoly`) and run
-  `sumcheck.Prove`; the two must agree on the sum and the residual. This is the
-  strongest available test — an independent implementation of the same claim.
-- **`ℓ` invariance**: the result must not depend on `ℓ`. Run `ℓ = 0` (all folklore),
-  `ℓ = m/2`, `ℓ = m` (all MSM) and require identical output. This catches errors in
-  the `S`-table path that a single `ℓ` would hide.
-- Negative cases: tampered round message, wrong `σ`, `α` of wrong length, and a
-  compensating tamper preserving `g(0)+g(1)`.
-- Mutation testing to confirm non-vacuity, as done for `crypto/sumcheck`.
+`ErrNilTree`, `ErrLeafIndexOutOfRange`, `ErrRaggedLeaves`, `ErrProofLengthMismatch`,
+`ErrInsufficientGenerators`, `ErrInvalidCosetDim`.
+
+### 3.4 Fuzz target — now genuinely owed
+
+Steps 1–2 deferred fuzzing for lack of a parsing entry point. `VerifyMerkleProof`
+**is** one: it consumes attacker-supplied `proof.Siblings` and a leaf. So:
+
+    FuzzVerifyMerkleProof  — must never panic; must never return true for a
+                             leaf/root pair not produced by BuildTree.
+
+**Must be wired into `.github/workflows/nightly-fuzz.yml`** (`{name, pkg, func}` in
+the `fuzz` job matrix) per AGENTS.md — a target outside that matrix only ever runs
+its seed corpus.
+
+## How it gets verified
+
+The tree is the kind of code that round-trips happily while being unsound, so the
+tests target *soundness*, not just agreement:
+
+1. **Round-trip** every index of trees with `2^0 … 2^10` leaves, `k ∈ {0,1,2}`.
+2. **Known-answer root** for a fixed 4-leaf tree, hardcoded hex. This is what pins
+   the hash format — prefixes, compressed encoding, child order — so none can drift
+   silently.
+3. **Second-preimage separation.** Build a 2-leaf tree with root `R`, then a 1-leaf
+   tree whose single leaf's serialization is the concatenation that produced `R`.
+   Roots must differ. **This test fails against gnark's prefix-less format**, which
+   is the whole reason for not adopting it — so it also documents the decision.
+4. **Wrong-leaf / wrong-index / tampered-sibling** must all return false. Including
+   a sibling swapped with its pair, which catches left/right order inversion — the
+   classic Merkle bug that a round-trip test cannot see.
+5. **Cross-check against an independent naive root**: a test-local recursive
+   `H(0x01 ‖ recurse(left) ‖ recurse(right))` written straight from the definition,
+   compared against `BuildTree`. Independent implementation, as with step 1's naive
+   encoder cross-check.
+6. **Tier-1 cross-check**: `G̃`'s table entry `j` must equal a direct
+   `Σ_k f[j·cols+k]·gens[k]` computed without `CommitField`, and
+   `G̃.EvaluatePoint` must be consistent with `f̃` on the matrix split.
+7. **`k`-invariance of the underlying codeword**: changing `k` regroups leaves and
+   so legitimately changes the root, but the *codeword* must be identical. Pins that
+   cosets only regroup and never reorder.
+8. **Determinism**: same inputs ⇒ same root, across two independent builds.
+9. **Mutation testing** to confirm non-vacuity, as for steps 1–2. Planned
+   mutations: drop leaf prefix; drop node prefix; swap child order; `RawBytes()` for
+   `Bytes()`; off-by-one in sibling index; coset chunking strided instead of
+   contiguous; row MSM using `gens` offset by one; odd-`m` rows/cols swapped.
+
+Coverage target ≥ 90% statements, race-clean, `go vet` + `gofmt` clean, matching
+steps 1–2.
 
 ## Deferred, with reasons
 
-- **Merkle oracle — gnark-crypto's tree cannot be used as the builder.**
-  `accumulator/merkletree` is a *streaming* tree from NebulousLabs (Sia), built for
-  storage proofs over data read once from disk. It **does not store the leaves**:
-  `Push`'s own doc says it keeps "only the log(n) elements necessary to build the
-  Merkle root and ... a proof that a piece of data is in the tree"
-  (`tree.go:201-204`). Internally it is a stack of subtree roots, merged on the fly
-  by `joinAllSubTrees`.
-
-  Hence `SetIndex`: it names, *in advance*, the one leaf a proof will later be
-  wanted for, so that `Push` can capture it as it streams past
-  (`tree.go:209-211`) and the joins can capture that path's siblings. It must be
-  called on an empty tree (`tree.go:319-321`) because after any `Push` the data for
-  every other index is already discarded, and `Prove` panics if it was never
-  called. `PushSubTree` does not help — it explicitly forbids the subtree holding
-  the proof index (`tree.go:254-259`).
-
-  So `t` openings would mean `t` full rebuilds: `n·t` leaf hashes instead of `n`.
-  At `n = 2^16`, `t = 100` that is ~6.5M leaf hashes vs 65k, and each leaf here is
-  a serialized G1 point (or a coset of them), so re-serialization is paid too. Not
-  broken — correct and RFC 6962 conformant for its intended streaming job — but
-  the opposite trade from what WHIR needs (many openings, small in-memory tree).
-
-  **Decision:** write a plain in-memory tree (~60 lines) that retains every level,
-  making any number of openings pointer walks. Titan's trees are small by design
-  (`O(√n)` leaves, smaller still under the `⁴√n` variant), so holding all levels
-  is cheap. This also makes path compression — shared upper nodes across query
-  paths, which the paper's implementation exploits — expressible later, whereas
-  the streaming tree cannot represent it at all. Reuse gnark-crypto's
-  `VerifyProof` and its `leafSum`/`nodeSum` domain separation so the hash format
-  stays compatible and audited; replace only the builder. Path compression is out
-  of scope for the first cut, per the scope decision.
-- **WHIR folding, CSP eval, full `Commit`/`Eval`.** Need steps 1–2 first.
-- **`O(⁴√n)` optimisations.** Explicitly deferred per the scope decision.
-- **Zero-knowledge.** The paper's implementation is not ZK; hiding would come from
-  hiding Pedersen commitments in the inner layer.
+- **WHIR folding rounds, CSP eval, `Eval`/`Open`.** Step 4. Step 3 deliberately
+  stops at a queryable oracle.
+- **`Setup` / generator generation.** `CommitField` takes `gens` from the caller.
+  Real generator derivation is a trust-setup question of its own.
+- **Path compression in `BatchProof`.** Struct shape reserves room; the Rust's
+  `MultiPath` is the model.
+- **`k > 0` in practice** (`O(⁴√n)`) — type is ready, remodel not ported.
+- **Zero-knowledge.** Unchanged: hiding would come from hiding Pedersen
+  commitments in tier 1.
 
 ## Implementation Progress
 
-- [x] Done — 1. `encode.go` + `domain.go` + `errors.go`: `Domain`, `reverseBits` /
-  `bitReversePermutation`, `EncodeGroupOracle`, `EncodeFieldOracle`.
-  Tests in `encode_test.go`, benchmarks in `encode_bench_test.go`.
-  **98.1% statement coverage, race-clean, `go vet` clean.** Six mutations each
-  independently fail the suite (see `docs/crypto/titan.md` §9). Docs written and
-  linked from `docs/README.md`.
-- [x] Done — 2. `multilinear.go` + `groupsumcheck.go`: `foldFirstField` /
-  `foldFirstGroup`, `eqTable`, `eqPoint`, `batchInvert` with a real
-  zero-denominator error, `msm`, `scaleEach`, `computeSTables`,
-  `roundMessageFromTable` (H0/H1 split), `roundMessageFolklore`, `restrictBoth`,
-  `interpolateGroupAt`, `ProveGroupEval` / `VerifyGroupEval`.
-  Tests in `groupsumcheck_test.go`, benchmarks in `groupsumcheck_bench_test.go`.
-  **92.6% statement coverage, race-clean, `go vet` clean.** Eleven mutations each
-  independently fail the suite (see `docs/crypto/titan.md` §10). Cross-check against
-  `crypto/sumcheck` passes; `ℓ`-invariance holds for every `ℓ ∈ [0, m]`.
-  Verifier written from the paper, since the Rust one is incomplete. Docs added as
-  `docs/crypto/titan.md` §6 (protocol), §7 (API), §8.2 (measurements), §10 (testing).
+- [x] **3.1 `merkle.go` + tests** — Done. `Tree` retains every level; `BuildTree`,
+  `Root` (returns a copy), `NumLeaves`, `Depth`, `Prove`, `ProveBatch`,
+  `VerifyMerkleProof`, `hashLeaf`, `hashNode`, `treeDepth`. RFC 6962 `0x00`/`0x01`
+  prefixes actually applied. Leaves are `[][]bls12381.G1Affine` with `cosetSize`
+  recorded on the tree. `merkle_test.go` has 19 tests including an independent naive
+  recursive root, second-preimage separation, and a known-answer leaf hash.
+- [x] **3.2 `commit.go` + tests** — Done. `Commitment{Root, NumVars, LogDomain, K,
+  NumLeaves}`, `GroupOpeningHint`, `FieldOpeningHint`, `CommitGroup`, `CommitField`,
+  `OpenLeaf`, `chunkIntoCosets` (contiguous), `matrixShape`, `numVarsOf`.
+  `commit_test.go` has 12 tests; the decisive ones are the direct per-row MSM
+  cross-check and the "group poly *is* the evaluation table" test.
+- [x] **3.3 `errors.go` additions** — Done. `ErrNilTree`, `ErrEmptyLeaves`,
+  `ErrRaggedLeaves`, `ErrLeafIndexOutOfRange`, `ErrProofLengthMismatch`,
+  `ErrInvalidCosetDim`, `ErrInsufficientGenerators`.
+- [x] **3.4 `FuzzVerifyMerkleProof` + `nightly-fuzz.yml` entry** — Done.
+  `merkle_fuzz_test.go`, 8 seeds, two properties (never panic, never accept).
+  Verified clean at 1.88M execs / 25s. Wired in as `titan-merkle-verify-proof`;
+  matrix now has 26 entries, YAML validated.
+- [x] **3.5 `docs/crypto/titan.md` new section** — Done. New §7 "Merkle Commitment
+  and the Two Tiers" (7.1–7.5), new §8.1 "Commitment" API, new §9.3 with four
+  measurement tables, §11 Testing rewritten with the new files, the 93.4% figure,
+  the 13-mutation table, §11.1 fuzzing and §11.2 the M9/M12 write-up. Sections
+  renumbered 7→8, 8→9, 9→10, 10→11, 11→12 with the TOC and cross-references updated.
+  `docs/README.md` already links `crypto/titan.md` and its description still matches.
+- [x] **3.6 Mutation testing pass** — Done. 13 mutations; 12 killed, and the
+  13th established as an *equivalent* mutant with evidence. See
+  "Decisions taken during step 3" below — this pass found one real soundness bug.
 
-## ✅ COMPLETE
+### Verification
 
-Both planned steps are done. Remaining work is step 3+ (Merkle oracle, WHIR folding,
-CSP eval, full `Commit`/`Eval`), which is out of scope for this plan.
+- Full suite green; **93.4% statement coverage** (`BuildTree`, `Prove`, `ProveBatch`,
+  `VerifyMerkleProof`, `hashLeaf`, `hashNode`, `treeDepth`, `chunkIntoCosets`,
+  `matrixShape`, `numVarsOf` all 100%; `CommitGroup` 88.2%, `CommitField` 87.0%,
+  `OpenLeaf` 87.5% — the uncovered lines are unreachable error returns from the
+  encoder, which the callers have already validated against).
+- Race-clean (22.7s), `go vet` clean, `gofmt` clean, no `fmt` import, license
+  headers present. Wider `crypto/...` tree green across 8 packages.
+- `make lint` **not run** — `golangci-lint` is absent in this environment. Owed
+  before any PR; not claimed as passing.
 
-### Decisions taken during step 2
+### Measurements (Apple M4 Max)
 
-- **`restrictBoth` is a batched MSM contraction, not repeated folding.** The naive
-  version (fold one variable at a time, `ℓ` times) measured **221 ms** of a 250 ms
-  prover at `m=12, ℓ=6` and made the choice of `ℓ` look irrelevant — the split sweep
-  came out flat. Contracting against the `eq(ρ,·)` table instead, one MSM per
-  surviving entry, cut it to ~8 ms and restored the expected curve (minimum at
-  `m/2`, **6.2×** the folklore baseline). Same scalar-mult count; Pippenger
-  amortizes the window setup. Recorded with the phase-by-phase numbers in
-  `docs/crypto/titan.md` §8.2.
-- **No transpose in `restrictBoth`**, unlike `computeSTables`. First-variable
-  folding makes the consumed prefix the low bits *within* each contiguous block, so
-  the slice is already contiguous; it is the surviving suffix that is strided in
-  `computeSTables`. I had this backwards on the first attempt and the cross-path
-  tests caught it immediately.
-- **`σ` is returned, not taken as an argument.** It is determined by `f` and `α`, so
-  accepting it would invite a caller to pass an inconsistent value.
-- **`ℓ` is bound into the transcript** even though it is only a performance knob:
-  both sides must agree on it to agree on the challenges, and binding it is free.
-  Consequence: proofs for different `ℓ` cannot be compared round-by-round, so
-  `ℓ`-invariance is tested on the claimed sum plus a separate direct comparison of
-  the two round-message paths at equal challenges.
-- **`ErrZeroDenominator` surfaces only when the affected round is an MSM round**, as
-  the folklore path contains no division by `eq(α_i,·)`. The boundary test therefore
-  runs with `ℓ = m`.
-- Benchmarks needed `*testing.B` copies of the random-input helpers; the step-1
-  helpers take `*testing.T` and Go has no common interface covering both that also
-  provides `Fatal` plus `Helper` in the way these use them.
-- No fuzz target yet — still owed when proof deserialization lands, and it must be
-  wired into `.github/workflows/nightly-fuzz.yml` per AGENTS.md.
-- `make lint` still not run: `golangci-lint` is not installed in this environment.
-  `go vet`, `gofmt` and the race detector are all clean.
+| | 2^8 | 2^10 | 2^12 | 2^14 |
+|---|---|---|---|---|
+| `BuildTree` | 72.6µs | 236µs | 679µs | 2.62ms |
+
+`ProveMany` at 2^14: 219ns (1 opening), 2.69µs (10), 25.5µs (100).
+`VerifyMerkleProof`: 763ns at depth 10, 964ns at depth 14 — linear in depth.
+`CommitField`: 8.24ms / 19.5ms / 46.8ms at `m = 10/12/14`.
+
+The 100-openings figure is the number that justifies the custom tree: **25.5µs
+against ~262ms** for a streaming tree's 100 rebuilds, ≈10,000×, and the gap widens
+linearly with query count. Tier 1 dominates `CommitField` (2^m scalar
+multiplications against the tree's O(√n) hashes), so the Merkle layer is not the
+bottleneck and the next optimization target is elsewhere.
+
+## Decisions taken during step 3
+
+1. **gnark-crypto's `accumulator/merkletree` reused for neither builder nor
+   verifier.** Half of a step-1 scope decision withdrawn on evidence — the RFC 6962
+   prefixes are commented out in v0.20.1 and `VerifyProof` is hardcoded to the
+   streaming orphan-merging shape. Recorded above as a revision rather than smuggled
+   in. ~120 lines instead of ~60.
+2. **Coset-shaped leaves from the start, `k = 0` in value.** Leaf shape determines
+   every root and every proof format, so the type is coset-shaped now even though
+   `k > 0` is deferred. A deliberate departure from "simplest thing that works".
+3. **Compressed `Bytes()` (48 bytes), not `RawBytes()` (96).** Leaves dominate
+   hashing; the verifier already pays decompression elsewhere. Infinity was checked
+   empirically — it encodes as `0xc0` followed by zeros, distinct from all-zeros, and
+   round-trips. Pinned by a known-answer test so a switch cannot happen silently.
+4. **Cosets are contiguous slices, never strided.** A strided chunking builds a
+   valid-looking tree over a *permutation* of the same points, which no round-trip
+   test can see. Pinned by `TestCommitGroupLeavesArePartitionOfCodeword`.
+5. **Odd `m` sends the extra variable to the rows** (`2^(s+1)` rows × `2^s` cols).
+   Keeps row MSMs shorter and grows the group multilinear, which is the cheaper side.
+   Arbitrary but must be fixed, since both sides must agree; `matrixShape` asserts
+   `rows·cols == 2^m`.
+6. **Mutation testing found a real forgery (M9).** Dropping the proof-length check
+   left the suite green: a one-leaf tree's root *is* its leaf hash, so a prover can
+   claim that leaf sits at index 0 of an 8-leaf tree with an **empty** path and the
+   verifier accepts. `TestVerifyRejectsWrongProofLength` only appeared to cover this —
+   its short and over-long cases are both caught incidentally by the digest
+   comparison. Two tests added; mutation now killed.
+7. **M12 is an equivalent mutant, not a test gap — and establishing that meant
+   correcting my own wrong claim.** I first asserted the per-sibling length check
+   prevented a forgery, on the strength of a real `hashNode` collision (a 20/44 split
+   of 64 bytes hashes identically to 32/32). The mutation kept surviving, which proved
+   the test was not reaching it. A reachability probe (sibling lengths 0..40 at every
+   level of 2/4/8-leaf trees) accepted zero cases both with and without the check: the
+   accumulator is always a 32-byte hash output, so only one side's length varies, and
+   the collision needs the attacker to control *both* sides of one `hashNode` call. The
+   check stays as documented defence-in-depth, load-bearing the moment anything feeds
+   `hashNode` variable-length input. Test rewritten as
+   `TestHashNodeHasNoLengthFraming`.
+8. **`VerifyMerkleProof` returns `bool`, not `error`.** Deliberate: malformed input
+   must not be distinguishable from a hash mismatch.
+9. **Benchmark warmup noise is real and was nearly misread.** `VerifyMerkleProof` at
+   depth 10 first measured 6865ns against 964ns at depth 14 — inverted, and wrong.
+   Re-running at `-benchtime=2000x` gave 763ns vs 964ns, correctly linear. Twenty
+   iterations is not enough to measure a sub-microsecond operation.
 
 ## Notes & Decisions
 
-- Errors: sentinel `errors.New` + fsc `errors.Wrapf`, never `fmt.Errorf`, matching
-  `crypto/sumcheck/errors.go` and the AGENTS.md rule.
-- Transcript: reuse `csp.Transcript` with a `Titan-v1`-style domain separator.
-- No new dependencies. gnark-crypto v0.20.1 supplies `fr`, `bls12381`, `MultiExp`
-  and `accumulator/merkletree`; everything else is in-repo.
-- Fuzz targets required by AGENTS.md for any parsing entry point, wired into
-  `.github/workflows/nightly-fuzz.yml`.
-- Docs: `docs/crypto/titan.md`, linked from `docs/README.md` under the existing
-  "Cryptographic Primitives" heading, before either step is marked complete.
-
-### Decisions taken during step 1
-
-- **`Domain` wraps `fft.NewDomain` for the root of unity, then materializes the
-  `2^d` powers.** The butterfly indexes the domain at power-of-two strides, so it
-  wants an explicit slice (this is what the Rust `multilinear_fft(domain: &[F])`
-  signature implies too). `fft.Domain`'s precomputed twiddles are laid out for its
-  own FFT, not for this access pattern, so only `Generator` is reused.
-- **`fft.NewDomain` panics past two-adicity rather than erroring** (verified:
-  `m (8589934592) is too big: the required root of unity does not exist`). So
-  `NewDomain` bounds `logSize` by `MaxLogDomainSize = 32` *before* calling it and
-  returns `ErrDomainTooLarge`. Also verified the generator is primitive, not a
-  lower-order element: `g^card == 1` while `g^(card/2) != 1`.
-- **The encoders take `sumcheck.FieldPoly` / `sumcheck.GroupPoly`** rather than
-  declaring parallel types, so a polynomial can be committed and sum-checked with
-  no conversion. This is also what lets the naive cross-check reuse the
-  independently-tested `EvaluatePoint`, so the two sides of the test share no code.
-- **Group butterfly works in Jacobian coordinates** and converts to affine once at
-  the end, since the inner loop is add/sub-heavy and affine addition is the more
-  expensive form.
-- **Deferred, deliberately: batching the butterfly by root.** Measured 10240 scalar
-  mults for `m=10, d=11` (matching `(n/2)·log n`), and the early passes reuse very
-  few distinct roots (pass 0: 2 roots over 1024 nodes). Grouping each pass by root
-  into one MSM per root would amortize window precomputation. Output-identical, so
-  it is a tuning change; kept out of the first cut to stay verifiable against the
-  reference. Recorded in `docs/crypto/titan.md` §7.1.
-- **No fuzz target yet** — the package has no parsing/deserialization entry point
-  so far. One is owed when proof deserialization lands, and must be added to
-  `.github/workflows/nightly-fuzz.yml` at that point.
-- **`make lint` was not run**: `golangci-lint` is not installed in this
-  environment. `gofmt -l` and `go vet` are clean; the lint gate still needs to run
-  before a PR.
+- Hash is SHA-256, matching `csp.Transcript` and the Rust reference's default.
+- Errors: sentinel `errors.New` in `errors.go`, wrapped with fsc `errors.Wrapf` at
+  call sites. Never `fmt`.
+- No new dependencies: `crypto/sha256` is stdlib, gnark-crypto already present.
+  Note the `accumulator/merkletree` import is now **not** used at all.
+- Open an issue before coding, per AGENTS.md, describing the gap only.
+- `make lint` still cannot run locally (`golangci-lint` absent); must run before PR.

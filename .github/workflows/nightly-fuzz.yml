@@ -63,6 +63,9 @@ jobs:
           - name: common-request-limits
             pkg: ./token/core/common
             func: FuzzRequestResourceLimits
+          - name: titan-merkle-verify-proof
+            pkg: ./token/core/zkatdlog/nogh/v1/crypto/titan
+            func: FuzzVerifyMerkleProof
           - name: zkatdlog-action-limits
             pkg: ./token/core/zkatdlog/nogh/v1/validator
             func: FuzzActionResourceLimits

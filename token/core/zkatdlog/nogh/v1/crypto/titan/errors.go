@@ -72,4 +72,32 @@ var (
 	// least as large as the message, and a rate below 1 needs it strictly
 	// larger.
 	ErrDomainTooSmall = errors.New("domain must be at least as large as the polynomial")
+
+	// ErrNilTree indicates that a required Merkle tree is nil.
+	ErrNilTree = errors.New("merkle tree cannot be nil")
+
+	// ErrEmptyLeaves indicates that a Merkle tree was requested over no leaves.
+	// A tree needs at least one leaf to have a root.
+	ErrEmptyLeaves = errors.New("merkle tree needs at least one leaf")
+
+	// ErrRaggedLeaves indicates that the leaves of a Merkle tree do not all hold
+	// the same number of group elements. Every leaf must be a coset of the same
+	// size, or the root would commit to inconsistently shaped data.
+	ErrRaggedLeaves = errors.New("all merkle leaves must hold the same number of points")
+
+	// ErrLeafIndexOutOfRange indicates that a requested opening names a leaf that
+	// does not exist in the tree.
+	ErrLeafIndexOutOfRange = errors.New("merkle leaf index out of range")
+
+	// ErrProofLengthMismatch indicates that a Merkle proof does not carry one
+	// sibling per level of the tree it claims to open.
+	ErrProofLengthMismatch = errors.New("merkle proof length does not match tree depth")
+
+	// ErrInvalidCosetDim indicates that the coset dimension k is negative, or is
+	// large enough that the codeword cannot be split into whole cosets.
+	ErrInvalidCosetDim = errors.New("invalid coset dimension")
+
+	// ErrInsufficientGenerators indicates that fewer Pedersen generators were
+	// supplied than the row length of the matrix form of the polynomial.
+	ErrInsufficientGenerators = errors.New("not enough generators to commit a row")
 )
