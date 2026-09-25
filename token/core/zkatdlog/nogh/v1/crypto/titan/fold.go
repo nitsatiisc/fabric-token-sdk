@@ -160,6 +160,16 @@ func proveFold(
 		proof.Queries = append(proof.Queries, &CosetOpening{Index: idx, Leaf: cp, Path: path})
 	}
 
+	// Absorb every opened point, mirroring the verifier so the two transcripts stay
+	// in lockstep. The prover has nothing to check and never derives the batching
+	// challenge itself; see verifyFold on why the openings are bound by the Merkle
+	// root rather than by this absorb.
+	for _, q := range proof.Queries {
+		for i := range q.Leaf {
+			absorbPoint(tr, &q.Leaf[i])
+		}
+	}
+
 	return proof, nil
 }
 
@@ -293,7 +303,12 @@ func verifyFold(
 		return errors.WithMessage(err, "failed to sample consistency queries")
 	}
 
-	eqR := eqTable(challenges)
+	// The structural checks stay per query: they are cheap next to the group
+	// operations, and each one can name the query that failed. Only the two MSMs
+	// are batched, below.
+	cosetSize := cfg.CosetSize()
+	leaves := make([]bls12381.G1Affine, 0, cfg.Queries*cosetSize)
+
 	for i, idx := range indices {
 		q := proof.Queries[i]
 		if q == nil {
@@ -306,26 +321,118 @@ func verifyFold(
 			return errors.Wrapf(ErrCosetOpeningInvalid,
 				"query %d opens coset %d, transcript requires %d", i, q.Index, idx)
 		}
-		if len(q.Leaf) != cfg.CosetSize() {
+		if len(q.Leaf) != cosetSize {
 			return errors.Wrapf(ErrCosetOpeningInvalid,
-				"query %d holds %d points, expected %d", i, len(q.Leaf), cfg.CosetSize())
+				"query %d holds %d points, expected %d", i, len(q.Leaf), cosetSize)
 		}
 		if !VerifyMerkleProof(c.Root, q.Leaf, q.Path) {
 			return errors.Wrapf(ErrCosetOpeningInvalid, "query %d is not under the committed root", i)
 		}
 
-		got, err := foldCoset(q.Leaf, eqR)
-		if err != nil {
-			return errors.WithMessagef(err, "query %d", i)
+		leaves = append(leaves, q.Leaf...)
+	}
+
+	// The batching challenge.
+	//
+	// The usual hazard with batched verification is a prover who learns the
+	// combining challenge before choosing what to open, and can then satisfy the
+	// combined equation while individual queries fail. That is not reachable here,
+	// and it is worth being precise about why rather than relying on absorb
+	// ordering: gamma is squeezed only on this side, the prover never derives it,
+	// and everything it could adapt is already pinned. The cosets are bound by
+	// c.Root, fixed at commit time and long before this proof existed; the indices
+	// come from the transcript, not the prover; and proof.Reduced was absorbed above
+	// before those indices were drawn.
+	//
+	// Mutation-checked, and it corrected an earlier comment here that claimed the
+	// absorb-then-squeeze order was itself load bearing: moving the squeeze before
+	// the absorb leaves the whole suite green, because it changes only gamma's value
+	// and the prover cannot see gamma either way. The absorb is retained because it
+	// keeps gamma a function of the openings actually presented -- cheap insurance
+	// against a future change that lets a prover pick cosets after seeing gamma --
+	// but it is not what makes this sound today.
+	for i := range leaves {
+		absorbPoint(tr, &leaves[i])
+	}
+	gamma, err := squeezeScalar(tr)
+	if err != nil {
+		return errors.WithMessage(err, "failed to squeeze the batching challenge")
+	}
+
+	// gamma^0 .. gamma^(Q-1), computed once and used on BOTH sides. Deriving them
+	// twice would be two places for the two sides to drift apart.
+	//
+	// The WEIGHTING is also defence in depth here, which is worth recording because
+	// it is surprising. Replacing every power with 1 -- an unweighted sum, which
+	// normally accepts any set of per-query errors that cancels -- leaves the suite
+	// green, and that is correct rather than a missing test. Cancelling errors have
+	// nowhere to live: the cosets are hashed whole into the Merkle leaves, and
+	// proof.Reduced, though sent in plain, is absorbed before the query indices are
+	// drawn, so perturbing it reshuffles the very eq vectors the perturbation would
+	// have to be orthogonal to. Constructing such a perturbation needs a fixed point
+	// of the hash; the attempt is written up in docs/crypto/titan.md section 13.7.
+	//
+	// So the ordering above is the load-bearing part, and gamma insures against a
+	// future change that breaks it. TestFoldReducedIsAbsorbedBeforeQueriesAreSampled
+	// fails if the absorb is ever moved after sampleQueryIndices, which is exactly
+	// when the weighting would stop being redundant.
+	gammaPow := make([]fr.Element, cfg.Queries)
+	gammaPow[0].SetOne()
+	for i := 1; i < cfg.Queries; i++ {
+		gammaPow[i].Mul(&gammaPow[i-1], &gamma)
+	}
+
+	// Left side: one MSM over the CONCATENATED cosets. The eq(r) scalars are shared
+	// across queries and the points differ, so batching cannot reduce the point
+	// count -- every opened point must be touched. What it buys is a single
+	// length-(Q*2^ell) Pippenger instead of Q length-2^ell MSMs, which at these
+	// sizes are far too short for the bucket method to pay for itself.
+	eqR := eqTable(challenges)
+	if len(eqR) != cosetSize {
+		return errors.Wrapf(ErrNumVarsMismatch,
+			"eq table holds %d entries, cosets hold %d", len(eqR), cosetSize)
+	}
+	cosetScalars := make([]fr.Element, 0, len(leaves))
+	for i := range indices {
+		for b := range cosetSize {
+			var s fr.Element
+			s.Mul(&gammaPow[i], &eqR[b])
+			cosetScalars = append(cosetScalars, s)
 		}
-		want, err := EncodeGroupOracleAt(proof.Reduced, folded, idx)
-		if err != nil {
-			return errors.WithMessagef(err, "failed to encode the reduced polynomial at %d", idx)
+	}
+	cosetSide, err := msm(leaves, cosetScalars)
+	if err != nil {
+		return errors.WithMessage(err, "failed to fold the opened cosets")
+	}
+
+	// Right side: the coefficients are the SAME for every query and only the eq
+	// vector changes, so the eq vectors aggregate into one and a single MSM over
+	// proof.Reduced replaces Q of them. This is the side that was costing
+	// Q*2^(m-ell) group operations.
+	combined := make([]fr.Element, len(proof.Reduced))
+	for i, idx := range indices {
+		eqAt := oracleEqAt(folded, idx, m-cfg.Ell)
+		if len(eqAt) != len(combined) {
+			return errors.Wrapf(ErrNumVarsMismatch,
+				"codeword eq table holds %d entries, reduced polynomial has %d", len(eqAt), len(combined))
 		}
-		if !got.Equal(&want) {
-			return errors.Wrapf(ErrCosetOpeningInvalid,
-				"query %d: the coset does not fold to the reduced codeword", i)
+		for j := range eqAt {
+			var t fr.Element
+			t.Mul(&gammaPow[i], &eqAt[j])
+			combined[j].Add(&combined[j], &t)
 		}
+	}
+	codewordSide, err := msm(proof.Reduced, combined)
+	if err != nil {
+		return errors.WithMessage(err, "failed to evaluate the reduced codeword")
+	}
+
+	// One verdict for the whole batch. Unlike the per-query form this cannot name
+	// which query failed; that is the cost of batching, and the structural checks
+	// above still report per query.
+	if !cosetSide.Equal(&codewordSide) {
+		return errors.Wrap(ErrCosetOpeningInvalid,
+			"the opened cosets do not fold to the reduced codeword")
 	}
 
 	return nil

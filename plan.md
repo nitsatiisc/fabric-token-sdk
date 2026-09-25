@@ -338,13 +338,22 @@ committed coset oracle.
       asymmetry. Not used by the fold phase, which keeps a path per `CosetOpening` so a
       failure can name the query.
 - [x] 5.10 Benchmarks — proof size vs `ℓ` on real serialized bytes; prove/verify vs `m`.
-- [x] 5.11 Mutation pass — 11 mutations. **Two real gaps found and closed**; two
-      equivalent mutants recorded. See Notes.
+- [x] 5.11 Mutation pass — 16 mutations across the per-query and batched verifiers.
+      **Two real gaps found and closed**; three equivalent mutants recorded, one of them
+      initially misclassified as a third gap. See Notes.
+- [x] 5.13 **Batch check 3 on both sides.** The two sides batch by structurally opposite
+      mechanisms: the reduced-codeword side aggregates the `eq` *scalar* vectors with the
+      point vector fixed (`Q·2^(m−ℓ)` → `2^(m−ℓ)` group ops, asymptotic), and the coset
+      side concatenates the *points* with `eq(r)` shared (one long Pippenger instead of
+      `Q` length-`2^ℓ` MSMs, constant factor). Same `γ^j` ladder on both sides, derived
+      once. Measured: **19.9→1.60ms, 26.2→2.41ms, 38.2→3.98ms** at m/ℓ = 8/1, 10/2, 12/3
+      — ~10×, and 226× against the original full-encode verifier at m=12.
 - [x] 5.12 `docs/crypto/titan.md` — folding added as **§13** (References renumbered to
       §14), §8's API table and §11's coverage table updated, and the now-false claims in
       §6.5, §7.5 and §12.8 corrected rather than left standing.
 
-Verification: suite green, race-clean, `go vet` clean, `gofmt` clean, coverage 91.0%.
+Verification: suite green, race-clean (79.6s), `go vet` clean, `gofmt` clean, coverage
+91.0%, whole-repo `go build ./...` clean.
 
 ### Still owed on step 5
 
@@ -357,6 +366,7 @@ Verification: suite green, race-clean, `go vet` clean, `gofmt` clean, coverage 9
 - [ ] Benchmark the `EncodeGroupOracleAt`-vs-`EncodeGroupOracle` crossover. The godoc
       claims the butterfly wins when most of the codeword is wanted; that is reasoning,
       not measurement, and is flagged as such.
+- [ ] Commit the batching work (5.13) — code, tests, §13.6/§13.7/§13.12 doc updates.
 
 ## Notes & Decisions — step 5
 
@@ -402,8 +412,39 @@ Verification: suite green, race-clean, `go vet` clean, `gofmt` clean, coverage 9
   by benchmarking and `pprof`, not by assumption: `verifyFold` encoded the **whole**
   folded domain to check `Q` points (80% `mulGLV`, `EncodeGroupOracle` 84% cumulative).
   `EncodeGroupOracleAt` fixed it — m=8/10/12 verify went 177/402/901ms → 19.1/26.2/37.7ms
-  against a prover at 11.1/65.9/297ms. The growth also changed character: it is now the
-  `Q·2^ℓ` MSM plus Merkle paths, not the codeword.
+  against a prover at 11.1/65.9/297ms. The growth also changed character: it stopped
+  tracking the codeword and started tracking the query work. **Correction to an earlier
+  note here:** the residual growth is dominated by `Q·2^(m−ℓ)`, the `Q` full-length MSMs
+  against the reduced polynomial — not by `Q·2^ℓ` plus Merkle paths, which I stated first
+  and which is far the smaller term. Getting that attribution right is what identified
+  the batching below.
+- **Batching check 3 is two opposite optimisations, not one.** The reduced-codeword side
+  has a *fixed* point vector and varying scalars, so `Q` MSMs collapse into one by summing
+  the `eq` vectors — an asymptotic win, `Q·2^(m−ℓ)` → `2^(m−ℓ)`. The coset side cannot do
+  that, because every query has different points; there the win is concatenating the
+  points so one long Pippenger can bucket, where `Q` separate length-`2^ℓ` MSMs are far too
+  short for bucketing to pay — a constant factor. Measured ~10× overall, 226× against the
+  original full-encode verifier at m=12. Batching removes the factor of `Q`, **not** the
+  `2^(m−ℓ)` term: `Reduced` is still sent in plain. Recursing instead of sending it is
+  WHIR proper and is what would make the verifier polylog.
+- **The γ weighting is defence in depth, and the transcript ordering is what is actually
+  load-bearing.** Setting every γ power to 1 — an unweighted sum — survives mutation, and
+  that is correct rather than a missing test. I first recorded it as a real soundness gap;
+  it is not. Cancelling per-query errors have nowhere to live: cosets are hashed whole into
+  the Merkle leaves, and `proof.Reduced`, though sent in plain and bound by no root, is
+  absorbed **before** the query indices are drawn, so perturbing it reshuffles the very
+  `eq` vectors the perturbation must be orthogonal to. Established by construction, not
+  argument: a `d` orthogonal to both `eqCur` and `Σ_j eq(curve_j)` was built (3×3 cross
+  product of the two constraint rows) and applying it made the verifier sample
+  `[426 459 108 105]` instead of the prover's openings. `TestFoldReducedIsAbsorbedBefore`
+  `QueriesAreSampled` now pins the ordering, and fails if the absorb moves after sampling —
+  which is exactly when γ would stop being redundant.
+- **Four tests in this work passed for the wrong reason before being fixed**, every one
+  because `VerifyMerkleProof` rejects a tampered leaf before the check under test runs.
+  The cancelling-error test went through three wrong versions on this exact hazard. This is
+  the dominant failure mode of negative testing here, so each negative test's godoc now
+  names which check does the rejecting — a test whose name implies it pins a check it does
+  not pin is worse than no test.
 - **`DefaultEll` validated on real bytes, not on the model it came from.** At m=12:
   ℓ=1→122184, ℓ=2→75928, **ℓ=3→58376 (min)**, ℓ=4→61368, ℓ=5→87016, ℓ=6→148760.
   `DefaultEll(12)` returns 3. The suggested starting point `ℓ = m/2 - 1` is 5 here, which

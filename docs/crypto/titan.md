@@ -662,8 +662,8 @@ so the Go verifier must be written from the paper rather than ported.
 | `coset_test.go` | the coset **definition** against an independent `EvaluatePoint` (6 configs); `⟨leaf, eq(r)⟩` equals the reduced codeword; two negatives pinning that the coset oracle is **not** a regrouping or a strided read of the flat codeword; `CommitCosets` round-trip and binding; validation |
 | `foldconfig_test.go` | `Q(λ=128, ρ=1/8) = 43` under capacity and 86 under Johnson; the `DefaultEll` size model; `Validate` over `ell ∈ [1, m/2]`, odd `m`, bad rate and bad query count |
 | `queries_test.go` | determinism; dependence on the transcript; distinctness and range including `n=256, q=43`; domain coverage; exhaustion at `q = n`; validation (nil transcript, non-power-of-two `n`, `q > n`) |
-| `fold_test.go` | round-trip for `m ∈ {4,6,8,10}` × `ell ∈ 1..m/2`; the reduced polynomial against `foldFirstField` applied `ell` times; **a lying prover** whose fold runs over another polynomial; **a foreign fold with genuine openings** (the test that check 3 is load-bearing, with `verifyFoldRoundsOnly` asserting checks 1–2 pass); every query position corrupted in turn, including the last; 11 soundness negatives (tampered leaf/path, wrong index, swapped and permuted queries, tampered/replaced/truncated reduced poly, tampered and dropped round, dropped query); wrong claim; wrong `alpha`; short coset; end-to-end `Eval`/`EvalGroup` with folding at `m ∈ {4,8,12}` incl. anti-downgrade in both directions and the prover-chosen query count; `m ≡ 0 mod 4` on the field path; validation |
-| `fold_bench_test.go` | proof size in **real serialized bytes** vs `ell ∈ 1..6` at `m = 12`; prove and verify at `m ∈ {8,10,12}` |
+| `fold_test.go` | round-trip for `m ∈ {4,6,8,10}` × `ell ∈ 1..m/2`; the reduced polynomial against `foldFirstField` applied `ell` times; **a lying prover** whose fold runs over another polynomial; **a foreign fold with genuine openings** (the test that check 3 is load-bearing, with `verifyFoldRoundsOnly` asserting checks 1–2 pass); every query position corrupted in turn, including the last; 11 soundness negatives (tampered leaf/path, wrong index, swapped and permuted queries, tampered/replaced/truncated reduced poly, tampered and dropped round, dropped query); wrong claim; wrong `alpha`; short coset; end-to-end `Eval`/`EvalGroup` with folding at `m ∈ {4,8,12}` incl. anti-downgrade in both directions and the prover-chosen query count; `m ≡ 0 mod 4` on the field path; the batched check 3 (per-query failures, per-query sensitivity of the combined equation, and the absorb-before-sample ordering that makes the combination sound without relying on `gamma` — see 13.7); validation |
+| `fold_bench_test.go` | proof size in **real serialized bytes** vs `ell ∈ 1..6` at `m = 12`; prove and verify at `m ∈ {8,10,12}`, the measurement behind the 10× batching speedup in 13.6 |
 
 Statement coverage is **91.0%** overall, race-clean. (It moved from 92.6% because the
 folding phase added more error paths than the negatives exercise; the soundness-critical
@@ -1256,10 +1256,54 @@ at every index across six configurations, so the fast path cannot drift from the
 one. The full-domain encoder is still the right tool when most of the codeword is
 wanted — the prover uses it.
 
+One correction to the attribution above, since it was stated wrongly once: the residual
+19→26→38ms growth is dominated by **`Q·2^(m−ℓ)`**, the `Q` MSMs against the reduced
+polynomial, *not* by `Q·2^ℓ` plus Merkle paths. The reduced polynomial has `2^(m−ℓ)`
+coefficients and each of the `Q` queries runs a full-length MSM against it, so that term
+is far larger than the coset folds. Getting the attribution right is what identified the
+batching below as worthwhile.
+
+#### Batching check 3
+
+Check 3 compares `Q` pairs of values. Both sides collapse into one equation, and the two
+sides batch by **structurally opposite** mechanisms:
+
+| side | what is shared | what is combined | effect |
+|---|---|---|---|
+| reduced codeword | the point vector `Reduced` | the `eq` **scalar** vectors, summed with `γ^j` | `Q·2^(m−ℓ)` → `2^(m−ℓ)` group ops — asymptotic |
+| opened cosets | the scalar vector `eq(r)` | the **points**, concatenated | same point count, one length-`Q·2^ℓ` Pippenger instead of `Q` length-`2^ℓ` MSMs — constant factor |
+
+The codeword side wins asymptotically because the points are fixed and only scalars vary,
+so `Q` MSMs become one. The coset side cannot win that way — every query has different
+points — but a single long MSM lets Pippenger bucket properly, where `Q` separate
+length-8 MSMs are far too short for bucketing to pay. The combined check is
+
+    ⟨concat(leaf_1..leaf_Q), γ^j ⊗ eq(r)⟩  ==  ⟨Reduced, Σ_j γ^j·eq(curve_j)⟩
+
+with the same `γ^j` ladder on both sides, computed once — deriving it twice would be two
+places for the sides to drift apart.
+
+Measured, `BenchmarkFoldVerify`, `-benchtime=3x`:
+
+| m/ℓ | per-query | batched | speedup |
+|---|---|---|---|
+| 8/1 | 19.9ms | 1.60ms | **12.4×** |
+| 10/2 | 26.2ms | 2.41ms | **10.9×** |
+| 12/3 | 38.2ms | 3.98ms | **9.6×** |
+
+Against the original full-encode verifier at m = 12 that is **901ms → 3.98ms, 226×**. The
+verifier is now roughly 75× faster than its own prover rather than 15× slower.
+
+Batching does **not** remove the `Q·2^(m−ℓ)` plaintext term from the proof itself —
+`Reduced` is still sent in full. Recursing instead of sending it in plain is WHIR proper,
+and is what would take the verifier to polylog; see 13.12.
+
 ### 13.7 Mutation testing the folding phase
 
-Eleven mutations were applied. Two real gaps were found; both are now closed, and each
-was confirmed by re-running the mutation.
+Sixteen mutations were applied across the per-query and batched versions. Two real gaps
+were found; both are now closed, and each was confirmed by re-running the mutation. Three
+survivors turned out to be equivalent mutants, one of which was initially misclassified as
+a third gap — see "The unweighted-sum survivor" below.
 
 **Gap 1 — the check that makes step 13 sound was untested.** Covered in 13.3: deleting
 check 3 left the suite green. The lesson is that a soundness test can pass for the
@@ -1296,6 +1340,40 @@ order (3), dropping the reduced-claim check, dropping the round-sum check, dropp
 round, swapping two queries, tampering with the reduced polynomial, and — confirming
 the transcript threading is load-bearing rather than cosmetic — having the verifier use
 an unchained transcript.
+
+**The unweighted-sum survivor, and why it is not a gap.** Setting every `γ` power to 1 —
+turning the batched combination into a plain unweighted sum — leaves the suite green. An
+unweighted sum normally *is* unsound: overshoot one query by δ, undershoot another by δ,
+and the totals agree while both queries are wrong. So this was first recorded as a real
+gap, and that was wrong. The cancelling attack is unconstructible here, for two
+independent reasons:
+
+1. **The cosets cannot host it.** A leaf is hashed whole, so any tampered coset fails
+   `VerifyMerkleProof` before the batched equation is evaluated.
+2. **`Reduced` cannot host it either**, even though it is sent in plain and bound by no
+   root. It is absorbed into the transcript **before** the query indices are sampled. A
+   perturbation `d` must satisfy `⟨d, Σ_j eq(curve_j)⟩ = 0` to survive the unweighted sum —
+   but changing `Reduced` reshuffles the indices `j`, and therefore the very vectors `d`
+   must be orthogonal to. The attacker needs a fixed point of the hash.
+
+Reason 2 was established by construction, not by argument. `d` supported on three
+coordinates and orthogonal to both `eqCur` (so check 2 stays silent) and `Σ_j eq(curve_j)`
+exists and was built — the 3×3 cross product of the two constraint rows. Applying it made
+the verifier sample `[426 459 108 105]` instead of the indices the prover had opened, and
+the index guard rejected before the equation ran.
+
+So `γ` is **defence in depth, and the absorb-before-sample ordering is what is
+load-bearing**. That makes the ordering the thing worth pinning, and
+`TestFoldReducedIsAbsorbedBeforeQueriesAreSampled` pins it: it fails if `Reduced` is
+absorbed after `sampleQueryIndices`. If someone ever moves that absorption — to tidy the
+transcript, or to let the prover stream — the unweighted-sum mutation stops being
+equivalent and becomes a real break, and `γ` becomes the only thing standing in the way.
+
+Four tests in this work passed for the wrong reason before being fixed, every one of them
+because `VerifyMerkleProof` rejects a tampered leaf before the check under test runs. That
+is the dominant failure mode of negative testing in this package, and the reason each
+negative test's godoc now names which check does the rejecting.
+
 
 ### 13.8 Transcript threading, and why not a fresh transcript
 
@@ -1386,6 +1464,15 @@ reduces the claim without closing it and now says so in its godoc.
 Deferred by design, unchanged from section 12.8: zero-knowledge; `Setup`; batched `Eval`
 at several points; serialization; and the `O(n^(1/4))` variant, which needs a second
 folding layer over the *generator* oracle and is not what `k` controls.
+
+One thing the batching in 13.6 does **not** fix: the verifier is still linear in
+`2^(m−ℓ)`, because `Reduced` is sent in plain and the verifier must touch every
+coefficient of it. Batching removed the factor of `Q`, not the term. Sending `Reduced` is
+the deliberate stopping point of this step — the claim is closed and sound, at one round
+of folding. Recursing instead of sending it in plain is WHIR proper: fold again over the
+reduced oracle rather than revealing it, repeat until the polynomial is small enough to
+send, and the verifier becomes polylogarithmic. That is the next structural step, not a
+tuning parameter.
 
 ## 14. References
 

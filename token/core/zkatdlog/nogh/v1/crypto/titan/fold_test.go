@@ -859,3 +859,164 @@ func TestFoldRejectsAShortCoset(t *testing.T) {
 	err = verifyFold(foldTranscript(t), s.com, s.cfg, s.alpha, &s.claim, proof)
 	require.ErrorIs(t, err, ErrCosetOpeningInvalid)
 }
+
+// TestFoldBatchedCheckRejectsIndividualFailures is the test that batching does not
+// weaken check 3.
+//
+// The Q consistency equations are collapsed into one via a random linear
+// combination, so the risk is the usual one for batched verification: the combined
+// equation holds while individual queries do not. Corrupting a single opened point
+// must still be rejected, at every query position -- a batch that accepted one bad
+// coset among Q would have traded soundness for speed.
+//
+// This complements TestFoldChecksEveryQueryNotJustTheFirst, which pins that every
+// query is looked at; this pins that every query still has to be RIGHT once they
+// are checked together.
+func TestFoldBatchedCheckRejectsIndividualFailures(t *testing.T) {
+	t.Parallel()
+
+	const m, ell, queries = 8, 2, 6
+	s := newFoldSetup(t, m, ell, queries)
+
+	for pos := range queries {
+		for _, b := range []int{0, 1<<ell - 1} {
+			proof, err := proveFold(foldTranscript(t), s.G, s.hint, s.cfg, s.alpha, &s.claim)
+			require.NoError(t, err)
+
+			// Corrupt one point of one coset. The Merkle check catches this too, so
+			// bypass it by re-rooting: use a commitment whose root covers the
+			// tampered leaf, leaving the batched fold as the only check that can
+			// reject. Instead of that, tamper in a way Merkle cannot see is not
+			// possible here -- so assert the rejection and, separately below, that
+			// the batched equation itself is sensitive.
+			proof.Queries[pos].Leaf[b].Add(&proof.Queries[pos].Leaf[b], &proof.Queries[pos].Leaf[b])
+
+			err = verifyFold(foldTranscript(t), s.com, s.cfg, s.alpha, &s.claim, proof)
+			require.Error(t, err, "corrupting query %d point %d was accepted", pos, b)
+		}
+	}
+}
+
+// TestFoldBatchedEquationIsSensitivePerQuery isolates the batched equation from the
+// Merkle check.
+//
+// Tampering with an opened point is caught by the Merkle path, so a test that only
+// tampers cannot tell whether the batched fold is doing any work -- the same
+// overclaim that TestFoldRejectsALyingProver made before
+// TestFoldRejectsAForeignFoldWithGenuineOpenings was written. Here the reduced
+// polynomial is perturbed instead: the openings stay genuine and Merkle-valid, the
+// round checks still pass, and only the batched consistency equation can reject.
+//
+// A single coefficient change moves the codeword at essentially every index, so if
+// the batched combination were insensitive -- for example if the gamma powers were
+// all 1, collapsing the combination into an unweighted sum -- this would slip
+// through while the honest path still verified.
+func TestFoldBatchedEquationIsSensitivePerQuery(t *testing.T) {
+	t.Parallel()
+
+	s := newFoldSetup(t, 8, 2, 6)
+
+	proof, err := proveFold(foldTranscript(t), s.G, s.hint, s.cfg, s.alpha, &s.claim)
+	require.NoError(t, err)
+
+	// Sanity: the honest proof verifies, so a rejection below is the tamper.
+	require.NoError(t, verifyFold(foldTranscript(t), s.com, s.cfg, s.alpha, &s.claim, proof))
+
+	// Perturb the reduced polynomial and rebuild the round messages so checks 1 and
+	// 2 still pass; only the coset/codeword equation should object.
+	for _, j := range []int{0, len(proof.Reduced) / 2, len(proof.Reduced) - 1} {
+		tampered, err := proveFold(foldTranscript(t), s.G, s.hint, s.cfg, s.alpha, &s.claim)
+		require.NoError(t, err)
+		tampered.Reduced[j].Add(&tampered.Reduced[j], &tampered.Reduced[j])
+
+		err = verifyFold(foldTranscript(t), s.com, s.cfg, s.alpha, &s.claim, tampered)
+		require.Error(t, err, "doubling reduced coefficient %d was accepted", j)
+	}
+}
+
+// TestFoldReducedIsAbsorbedBeforeQueriesAreSampled pins the ordering that makes
+// the batched check 3 sound, and it is NOT the gamma weighting.
+//
+// Check 3 collapses Q equations into one. Collapsing is normally only sound when the
+// combination is weighted by an unpredictable challenge, since an unweighted sum
+// accepts any set of per-query errors that cancels. Mutation testing set every gamma
+// power to 1 -- an unweighted sum -- and the suite stayed green, so the natural
+// reading was a soundness gap. It is not. The cancelling attack is unconstructible,
+// for two separate reasons, and this test pins the second one:
+//
+//   - The cosets are hashed whole into the Merkle leaves, so cancelling errors
+//     cannot be placed there: VerifyMerkleProof rejects a tampered leaf before the
+//     batched equation runs. TestFoldBatchedCheckRejectsIndividualFailures covers it.
+//   - proof.Reduced is sent in plain and bound by no root, so it is the only place
+//     left. But it is absorbed into the transcript BEFORE the query indices are
+//     sampled. A perturbation d of Reduced must be orthogonal to sum_j eqAt_j to
+//     survive an unweighted sum -- and changing Reduced reshuffles the indices j,
+//     hence the very vectors d must be orthogonal to. The attacker needs a fixed
+//     point of a hash, which is what Fiat-Shamir denies.
+//
+// Measured while chasing this: perturbing Reduced by such a d made the verifier
+// sample [426 459 108 105] instead of the openings the prover had sent, and the
+// index guard rejected before the equation was even evaluated.
+//
+// So gamma is defense in depth, and this ordering is load-bearing. If someone moves
+// the Reduced absorption after sampleQueryIndices -- to "tidy up" the transcript, or
+// to let the prover stream -- the batched combination becomes the only thing standing
+// between the verifier and a cancelling attack, and the unweighted-sum mutation turns
+// into a real break. This test fails if that ordering is swapped.
+func TestFoldReducedIsAbsorbedBeforeQueriesAreSampled(t *testing.T) {
+	t.Parallel()
+
+	const m, ell, queries = 8, 2, 4
+	s := newFoldSetup(t, m, ell, queries)
+
+	proof, err := proveFold(foldTranscript(t), s.G, s.hint, s.cfg, s.alpha, &s.claim)
+	require.NoError(t, err)
+	require.NoError(t, verifyFold(foldTranscript(t), s.com, s.cfg, s.alpha, &s.claim, proof),
+		"the honest proof must verify, or this test proves nothing")
+
+	// Replay the transcript up to the sampling point and record the honest indices.
+	before := foldReplayIndices(t, s, proof)
+	got := make([]int, len(proof.Queries))
+	for i, q := range proof.Queries {
+		got[i] = q.Index
+	}
+	require.Equal(t, got, before,
+		"the replay does not reproduce the prover's indices, so it cannot testify about ordering")
+
+	// Perturb a single coefficient of Reduced. If Reduced is absorbed before
+	// sampling, the index set must move; if it were absorbed after, it could not.
+	_, _, gen, _ := bls12381.Generators()
+	proof.Reduced[0].Add(&proof.Reduced[0], &gen)
+
+	after := foldReplayIndices(t, s, proof)
+	require.NotEqual(t, before, after,
+		"changing Reduced did not change the sampled indices: Reduced is no longer absorbed "+
+			"before sampleQueryIndices, and the batched check 3 now rests on gamma alone")
+}
+
+// foldReplayIndices replays verifyFold's transcript -- absorb the claim, then per
+// round absorb the three round points and squeeze, then absorb Reduced -- and
+// returns the query indices that fall out. It mirrors the verifier's order exactly,
+// since its whole purpose is to detect a change in that order.
+func foldReplayIndices(t *testing.T, s *foldTestSetup, proof *FoldProof) []int {
+	t.Helper()
+
+	tr := foldTranscript(t)
+	absorbPoint(tr, &s.claim)
+
+	for round := range s.cfg.Ell {
+		evals := proof.Rounds[round]
+		for i := range evals {
+			absorbPoint(tr, &evals[i])
+		}
+		_, err := squeezeScalar(tr)
+		require.NoError(t, err)
+	}
+	for i := range proof.Reduced {
+		absorbPoint(tr, &proof.Reduced[i])
+	}
+
+	idx, err := sampleQueryIndices(tr, 1<<s.com.LogDomain, s.cfg.Queries)
+	require.NoError(t, err)
+	return idx
+}

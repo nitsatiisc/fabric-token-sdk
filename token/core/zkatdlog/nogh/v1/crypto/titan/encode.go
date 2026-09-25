@@ -234,14 +234,28 @@ func EncodeGroupOracleAt(p sumcheck.GroupPoly, dom *Domain, i int) (bls12381.G1A
 		return out, errors.Wrapf(ErrLeafIndexOutOfRange, "domain index %d is not in [0, %d)", i, dom.Size())
 	}
 
+	return msm(p, oracleEqAt(dom, i, m))
+}
+
+// oracleEqAt returns the eq table of the power curve at dom.Elements[i], in m
+// variables: the scalar vector whose dot product with a group polynomial's
+// coefficients is that polynomial's codeword entry at index i.
+//
+// It is factored out of EncodeGroupOracleAt because the batched consistency check
+// in verifyFold needs the eq VECTORS rather than the evaluated points -- it sums
+// them under the batching challenge and then does one MSM instead of one per
+// query. Two copies of the squaring loop would be two places for the power-curve
+// convention to drift.
+//
+// The caller has already validated i against dom and m against len(p).
+func oracleEqAt(dom *Domain, i, m int) sumcheck.FieldPoly {
 	// The power curve at x: coordinate j takes x^(2^j). Squaring repeatedly keeps
 	// this to m squarings rather than m exponentiations.
-	x := dom.Elements[i]
 	curve := make([]fr.Element, m)
-	curve[0] = x
+	curve[0] = dom.Elements[i]
 	for j := 1; j < m; j++ {
 		curve[j].Square(&curve[j-1])
 	}
 
-	return msm(p, eqTable(curve))
+	return eqTable(curve)
 }
