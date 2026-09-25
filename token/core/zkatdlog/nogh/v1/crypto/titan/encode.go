@@ -200,3 +200,48 @@ func encodeParams(length int, isNil bool, dom *Domain) (int, error) {
 
 	return m, nil
 }
+
+// EncodeGroupOracleAt evaluates the codeword at a SINGLE domain point, returning
+// the value EncodeGroupOracle would place at index i.
+//
+// # Why this exists
+//
+// A verifier checking Q consistency queries needs Q codeword points, not the whole
+// codeword. Calling EncodeGroupOracle and indexing into it costs
+// (n/2)*log n scalar multiplications to use Q of the n results, which made the
+// folding verifier slower than its own prover and linear in the polynomial size --
+// the opposite of what a polynomial commitment scheme is for. This is one MSM of
+// length 2^m per point.
+//
+// The value is the multilinear evaluated along the power curve,
+//
+//	out = ptilde(x, x^2, x^4, ..., x^(2^(m-1)))    at x = dom.Generator^i
+//
+// computed as a dot product of p against the eq table of that point, which is the
+// definition EncodeGroupOracle's butterfly computes in bulk. The two agree
+// exactly; TestEncodeGroupOracleAtMatchesFullEncoding pins that.
+//
+// Use EncodeGroupOracle when most of the codeword is needed -- the butterfly wins
+// by a log factor there. Use this when only a few points are.
+func EncodeGroupOracleAt(p sumcheck.GroupPoly, dom *Domain, i int) (bls12381.G1Affine, error) {
+	var out bls12381.G1Affine
+
+	m, err := encodeParams(len(p), p == nil, dom)
+	if err != nil {
+		return out, err
+	}
+	if i < 0 || i >= dom.Size() {
+		return out, errors.Wrapf(ErrLeafIndexOutOfRange, "domain index %d is not in [0, %d)", i, dom.Size())
+	}
+
+	// The power curve at x: coordinate j takes x^(2^j). Squaring repeatedly keeps
+	// this to m squarings rather than m exponentiations.
+	x := dom.Elements[i]
+	curve := make([]fr.Element, m)
+	curve[0] = x
+	for j := 1; j < m; j++ {
+		curve[j].Square(&curve[j-1])
+	}
+
+	return msm(p, eqTable(curve))
+}

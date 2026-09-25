@@ -212,6 +212,37 @@ func (t *Tree) ProveBatch(indices []int) (*BatchProof, error) {
 	return &BatchProof{Proofs: proofs}, nil
 }
 
+// VerifyBatch reports whether every leaf in leaves opens under root via the
+// corresponding path in proof.
+//
+// The leaves pass alongside the proof because BatchProof carries only paths, not
+// leaf contents: a Merkle proof authenticates data the verifier already holds. The
+// two slices must therefore be the same length, and leaves[i] is checked against
+// proof.Proofs[i].
+//
+// Like VerifyMerkleProof this returns a bool, for the same reason: every failure is
+// the one verdict "these leaves do not open this root", and reporting which leaf
+// failed would hand an adversary a distinguisher. It is all-or-nothing -- a single
+// bad opening rejects the batch.
+//
+// Note that this checks each path independently; it is a convenience over calling
+// VerifyMerkleProof in a loop, not a cheaper batched verification. The fold phase
+// does not use it, because CosetOpening carries its own path per query so that a
+// failure can name the query index (see verifyFold); it exists so that ProveBatch
+// has a counterpart rather than being an exported prover with no verifier.
+func VerifyBatch(root []byte, leaves [][]bls12381.G1Affine, proof *BatchProof) bool {
+	if proof == nil || len(proof.Proofs) != len(leaves) || len(leaves) == 0 {
+		return false
+	}
+	for i := range leaves {
+		if !VerifyMerkleProof(root, leaves[i], proof.Proofs[i]) {
+			return false
+		}
+	}
+
+	return true
+}
+
 // VerifyMerkleProof reports whether leaf sits at proof.Index in the tree with the
 // given root.
 //

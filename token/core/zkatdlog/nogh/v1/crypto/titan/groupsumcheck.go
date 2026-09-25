@@ -7,6 +7,7 @@ SPDX-License-Identifier: Apache-2.0
 package titan
 
 import (
+	"encoding/binary"
 	"math/bits"
 
 	mathlib "github.com/IBM/mathlib"
@@ -101,6 +102,32 @@ type GroupSumCheckOpening struct {
 // Titan reaches this primitive only after sum-check has aggregated any
 // boolean-coordinate evaluations into a single random point.
 func ProveGroupEval(curve *mathlib.Curve, f sumcheck.GroupPoly, alpha []fr.Element, ell int) (*GroupSumCheckProof, *GroupSumCheckOpening, bls12381.G1Affine, error) {
+	var zero bls12381.G1Affine
+	if curve == nil {
+		return nil, nil, zero, ErrNilCurve
+	}
+	m, err := checkGroupEvalParams(len(f), f == nil, alpha, ell)
+	if err != nil {
+		return nil, nil, zero, err
+	}
+
+	return ProveGroupEvalWithTranscript(newGroupSumCheckTranscript(curve, m, ell, alpha), curve, f, alpha, ell)
+}
+
+// ProveGroupEvalWithTranscript is ProveGroupEval against a caller-supplied
+// transcript, which it absorbs into and squeezes from in place.
+//
+// Titan's folding phase needs its challenges to depend on every sum-check message,
+// so the two protocols share one Fiat-Shamir chain rather than opening a second
+// one. Passing the transcript in is what makes that possible: ProveGroupEval keeps
+// its own transcript private and a caller that needs to continue the chain uses
+// this entry point instead.
+//
+// tr must be positioned exactly as newGroupSumCheckTranscript leaves it -- the
+// caller is responsible for the domain separator and for absorbing m, ell and
+// alpha. ProveGroupEval does that itself; proveFold reuses the transcript this
+// function returns, already advanced past every round message.
+func ProveGroupEvalWithTranscript(tr *csp.Transcript, curve *mathlib.Curve, f sumcheck.GroupPoly, alpha []fr.Element, ell int) (*GroupSumCheckProof, *GroupSumCheckOpening, bls12381.G1Affine, error) {
 	var sigma bls12381.G1Affine
 
 	if curve == nil {
@@ -121,7 +148,9 @@ func ProveGroupEval(curve *mathlib.Curve, f sumcheck.GroupPoly, alpha []fr.Eleme
 		return nil, nil, sigma, err
 	}
 
-	tr := newGroupSumCheckTranscript(curve, m, ell, alpha)
+	if tr == nil {
+		return nil, nil, sigma, errors.New("cannot prove a group evaluation without a transcript")
+	}
 
 	proof := &GroupSumCheckProof{Rounds: make([][numRoundEvals]bls12381.G1Affine, 0, m)}
 	challenges := make([]fr.Element, 0, m)
@@ -215,6 +244,30 @@ func VerifyGroupEval(curve *mathlib.Curve, proof *GroupSumCheckProof, alpha []fr
 	if curve == nil {
 		return nil, ErrNilCurve
 	}
+	m := len(alpha)
+	if m == 0 {
+		return nil, errors.Wrap(ErrNumVarsMismatch, "alpha must have at least one coordinate")
+	}
+	if ell < 0 || ell > m {
+		return nil, errors.Wrapf(ErrInvalidSplit, "ell is %d, must be in [0, %d]", ell, m)
+	}
+
+	return VerifyGroupEvalWithTranscript(newGroupSumCheckTranscript(curve, m, ell, alpha), curve, proof, alpha, sigma, ell)
+}
+
+// VerifyGroupEvalWithTranscript is VerifyGroupEval against a caller-supplied
+// transcript, which it absorbs into and squeezes from in place.
+//
+// This is the verifier's half of the transcript threading described on
+// ProveGroupEvalWithTranscript: the folding phase continues the same Fiat-Shamir
+// chain, so verifyFold needs the transcript this function leaves behind, advanced
+// past every round message and positioned identically to the prover's.
+//
+// tr must be positioned exactly as newGroupSumCheckTranscript leaves it.
+func VerifyGroupEvalWithTranscript(tr *csp.Transcript, curve *mathlib.Curve, proof *GroupSumCheckProof, alpha []fr.Element, sigma *bls12381.G1Affine, ell int) (*GroupSumCheckOpening, error) {
+	if curve == nil {
+		return nil, ErrNilCurve
+	}
 	if proof == nil {
 		return nil, ErrNilProof
 	}
@@ -232,7 +285,9 @@ func VerifyGroupEval(curve *mathlib.Curve, proof *GroupSumCheckProof, alpha []fr
 		return nil, errors.Wrapf(ErrRoundCountMismatch, "proof has %d rounds, expected %d", len(proof.Rounds), m)
 	}
 
-	tr := newGroupSumCheckTranscript(curve, m, ell, alpha)
+	if tr == nil {
+		return nil, errors.New("cannot verify a group evaluation without a transcript")
+	}
 
 	// expected is the value the current round must sum to: sigma in round 1, and
 	// the previous round's message interpolated at the previous challenge after.
@@ -641,10 +696,19 @@ const DomainSeparator = "TitanGroupSumCheck-v1"
 //
 // ell is bound even though it is only a performance knob, because the two sides
 // must agree on it to agree on the challenges, and because binding it is free.
+//
+// m and ell are absorbed as 32-bit big-endian rather than as single bytes: a byte
+// each would alias (m, ell) pairs 256 apart, and while nothing in this package
+// reaches m = 256 today, a transcript that silently collides on its public
+// parameters is the kind of latent break that is much cheaper to prevent than to
+// find.
 func newGroupSumCheckTranscript(curve *mathlib.Curve, m, ell int, alpha []fr.Element) *csp.Transcript {
 	tr := &csp.Transcript{Curve: curve}
 	tr.InitHasherWithDomain(DomainSeparator)
-	tr.Absorb([]byte{byte(m), byte(ell)})
+	var params [8]byte
+	binary.BigEndian.PutUint32(params[0:4], uint32(m))
+	binary.BigEndian.PutUint32(params[4:8], uint32(ell))
+	tr.Absorb(params[:])
 	for i := range alpha {
 		b := alpha[i].Bytes()
 		tr.Absorb(b[:])

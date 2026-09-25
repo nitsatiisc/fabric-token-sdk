@@ -1,7 +1,8 @@
-# Plan: Titan multilinear PCS — step 4 (`Eval`: completing the PCS)
+# Plan: Titan multilinear PCS — step 5 (folding: closing the evaluation claim)
 
-Steps 1–3 are complete and committed (`ccc7e99d`, `3dd550d8`, `cdcc053c`). Step 3's
-plan is preserved at `git show cdcc053c:plan.md`. **This plan covers step 4 only.**
+Steps 1–4 are complete and committed (`ccc7e99d`, `3dd550d8`, `cdcc053c`, `f8d313bc`,
+`94173bd4`). Earlier plans are preserved in git history (`git show cdcc053c:plan.md`).
+**Step 4's plan is retained below for context; step 5 is at the end.**
 
 ## Goal
 
@@ -297,3 +298,130 @@ argument), not at `Eval` time.
       `TestEvalSigmaPartialIsTheFoldedCommitment` already asserts, so no test can or
       should distinguish them. Documented in docs section 12.9 rather than papered
       over.
+
+---
+
+# Step 5 — Folding: closing the group polynomial evaluation claim
+
+## Goal
+
+After step 4, **neither verifier was sound against a prover who lied about the
+oracle**: both reduced `f̃(α) = σ` to a residual claim about a polynomial nobody had
+queried. Step 5 closes that with `ℓ` rounds of WHIR folding, the reduced polynomial sent
+in plain and tested as an `eq` dot product, and `Q` consistency queries against a
+committed coset oracle.
+
+## Implementation Progress
+
+- [x] 5.1 `domain.go` `Squared()` + `domain_test.go` — pins `g_(d-1) = g_d²` and the
+      element-squaring relation for `d ∈ 2..18`. This was an **unstated gnark-crypto
+      dependency** that all cross-round index arithmetic rests on, and there was no
+      `domain_test.go` at all before.
+- [x] 5.2 `coset.go` + `coset_test.go` — `EncodeCosets`/`foldCoset`/`CommitCosets`/
+      `OpenCoset`, built **per slice** rather than by regrouping the flat codeword.
+      Gathered leaves are copies, not sub-slices of the codeword.
+- [x] 5.3 `foldconfig.go` + tests — `FoldConfig`, `SoundnessRegime`, `QueryCount`,
+      `DefaultEll`, `DefaultFoldConfig`, `Validate`.
+- [x] 5.4 `queries.go` + `queries_test.go` — `sampleQueryIndices`, distinct and in
+      range, rejection-sampled from the transcript.
+- [x] 5.5 `groupsumcheck.go` — `ProveGroupEvalWithTranscript`/
+      `VerifyGroupEvalWithTranscript`. The originals became thin wrappers, so
+      **no existing call site changed** (the plan had anticipated 4).
+- [x] 5.6 `fold.go` + `fold_test.go` — `proveFold`/`verifyFold`, `FoldProof`,
+      `CosetOpening`, and the three verifier checks.
+- [x] 5.7 `commit.go`/`coset.go`/`eval.go` wiring — `Commitment.Cosets`,
+      `CosetCommitment.Fold`, `CommitGroupWithFold`/`CommitFieldWithFold`,
+      `EvalProof.Fold`/`GroupEvalProof.Fold`, anti-downgrade in both directions.
+- [x] 5.8 `encode.go` `EncodeGroupOracleAt` + tests — the fix for the verifier cost
+      defect below; equivalence to the butterfly pinned at every index.
+- [x] 5.9 `merkle.go` `VerifyBatch` + tests — closes the exported-prover-with-no-verifier
+      asymmetry. Not used by the fold phase, which keeps a path per `CosetOpening` so a
+      failure can name the query.
+- [x] 5.10 Benchmarks — proof size vs `ℓ` on real serialized bytes; prove/verify vs `m`.
+- [x] 5.11 Mutation pass — 11 mutations. **Two real gaps found and closed**; two
+      equivalent mutants recorded. See Notes.
+- [x] 5.12 `docs/crypto/titan.md` — folding added as **§13** (References renumbered to
+      §14), §8's API table and §11's coverage table updated, and the now-false claims in
+      §6.5, §7.5 and §12.8 corrected rather than left standing.
+
+Verification: suite green, race-clean, `go vet` clean, `gofmt` clean, coverage 91.0%.
+
+### Still owed on step 5
+
+- [ ] `make lint` — `golangci-lint` is absent in this environment, so it has **not**
+      been run and must not be claimed as passing.
+- [ ] GitHub issues for steps 3, 4 and 5 — `gh` is unavailable here. Step 3's commit
+      (`cdcc053c`) already precedes its issue; the fix is to open the issue, then amend
+      `cdcc053c` with `Fixes #N` before pushing.
+- [ ] **Do not push** — the branch is ahead of `origin/sumcheck` with no go-ahead given.
+- [ ] Benchmark the `EncodeGroupOracleAt`-vs-`EncodeGroupOracle` crossover. The godoc
+      claims the butterfly wins when most of the codeword is wanted; that is reasoning,
+      not measurement, and is flagged as such.
+
+## Notes & Decisions — step 5
+
+- **A coset is not a regrouping of the flat codeword.** `EncodeGroupOracle` gives
+  `f̃(x, x², x⁴, …)` at every `x ∈ L`; a coset needs `f(b, powers(y))` with `b`
+  **boolean**. The strided set `{y + b·N/2^ℓ}` is the fold's dependency closure but its
+  *values* are different objects — three attempts to match scored 0/512, 1/512, 1/512.
+  Hence the per-slice construction, with two tests pinning the negative, because a
+  wrong-but-consistent layout verifies against itself.
+- **`chunkIntoCosets`' comment was wrong, in exactly the way it warned about.** It
+  claimed leaves must be contiguous and that striding "would still build a valid-looking
+  tree over a reordering of the same points". Harmless only because every caller passed
+  `k=0`. Replaced with the probe-verified rule.
+- **`k = ℓ` makes one primitive serve two jobs.** `⟨leaf, eq(r)⟩` equals the reduced
+  polynomial's codeword at that index, so a consistency query is a single dot product
+  rather than `ℓ` fold rounds — and the same operation tests the final reduced claim.
+- **MUT3: the single check that makes step 5 sound was untested.** Deleting check 3 (the
+  coset-fold comparison) left the whole suite **green**. `TestFoldRejectsALyingProver`
+  was being caught by the *Merkle* check, so its name overclaimed. Closing it needed a
+  strictly harder attack — `TestFoldRejectsAForeignFoldWithGenuineOpenings` grafts
+  genuine openings of the real oracle into a proof folded over `f'`, with
+  `verifyFoldRoundsOnly` asserting checks 1–2 pass so only check 3 can reject. The older
+  test's godoc was amended rather than deleted. Re-running the mutation confirms the fix.
+- **MUT6: the verifier could check fewer queries than it sampled.** Sampling `Q-1` left
+  the suite green, because `sampleQueryIndices` draws sequentially — `Q-1` is a *prefix*
+  of the honest `Q`, so a truncated loop agrees on everything it looks at. The
+  `len(proof.Queries) != cfg.Queries` guard does not help: it bounds what the prover
+  **sends**, not what the verifier **reads**, and every other negative tampered with
+  query `[0]`. Closed by `TestFoldChecksEveryQueryNotJustTheFirst`, which corrupts each
+  position in turn including the last; re-running the mutation confirms it.
+- **Two equivalent mutants, recorded not papered over.** (1) Encoding at `q.Index`
+  instead of the sampled `idx` — the `q.Index != idx` guard above makes them provably
+  equal, though `idx` is still better code for not depending on that guard. (2) Deleting
+  the `CosetSize()` check — a leaf is hashed whole, so `VerifyMerkleProof` rejects a
+  short leaf first (verified directly). `TestFoldRejectsAShortCoset`'s godoc states that
+  it is the Merkle check doing the work, since a test whose name implies it pins a check
+  it does not pin is worse than no test.
+- **I introduced a soundness hole and caught it while wiring.** The first
+  `VerifyEvalGroup` derived the query count as `len(proof.Fold.Queries)`, letting the
+  prover pick its own security level. Fixed by moving `Fold FoldConfig` into
+  `CosetCommitment`. A security parameter the prover chooses is not one.
+- **The verifier was 15× slower than its own prover, and asymptotically wrong.** Found
+  by benchmarking and `pprof`, not by assumption: `verifyFold` encoded the **whole**
+  folded domain to check `Q` points (80% `mulGLV`, `EncodeGroupOracle` 84% cumulative).
+  `EncodeGroupOracleAt` fixed it — m=8/10/12 verify went 177/402/901ms → 19.1/26.2/37.7ms
+  against a prover at 11.1/65.9/297ms. The growth also changed character: it is now the
+  `Q·2^ℓ` MSM plus Merkle paths, not the codeword.
+- **`DefaultEll` validated on real bytes, not on the model it came from.** At m=12:
+  ℓ=1→122184, ℓ=2→75928, **ℓ=3→58376 (min)**, ℓ=4→61368, ℓ=5→87016, ℓ=6→148760.
+  `DefaultEll(12)` returns 3. The suggested starting point `ℓ = m/2 - 1` is 5 here, which
+  measures 49% larger.
+- **The field path needs `m ≡ 0 mod 4`, not just `m` even.** Folding attaches to leg 1,
+  which runs over `rowVars = m - m/2`; that must be even, so m=4,8,12 work and m=6,10 do
+  not. Surfaced as a `DefaultFoldConfig` rejection at m=6 that looked like a test bug and
+  is not. Pinned by `TestFieldFoldRequiresMDivisibleByFour`.
+- **Transcript threading is load-bearing, not cosmetic** — confirmed by mutation: a
+  verifier using an unchained transcript fails both the round trip and the soundness
+  test. The rejected alternative (a fresh transcript absorbing the sum-check's outputs)
+  would depend on the absorb list being complete, and an omission is a silent failure
+  every honest test passes — the same shape as the `evalTranscriptHeader` gap step 4
+  found.
+- **`Q = 43`, not 42.** `⌈128 / log₂ 8⌉ = 43`; 42 gives 126 bits. Capacity is
+  **conjectured** and Johnson is what is **provable**; `SoundnessRegime`'s godoc says so
+  at the type, since choosing `Capacity` is choosing a conjecture.
+- **`randomLeaves` is deterministic despite its name**, so my first `VerifyBatch`
+  foreign-root subtest rebuilt the *same* tree and passed vacuously. Caught because the
+  subtest failed when it should have; now perturbs a leaf and asserts the roots differ
+  via `require.NotEqual`, so it cannot silently degenerate again.

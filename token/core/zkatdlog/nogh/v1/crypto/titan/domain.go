@@ -72,6 +72,47 @@ func NewDomain(logSize int) (*Domain, error) {
 // Size returns the number of domain elements, 2^LogSize.
 func (d *Domain) Size() int { return len(d.Elements) }
 
+// Squared returns the domain L^2 = { x^2 : x in L }, the multiplicative subgroup
+// of half the order. It is the domain each WHIR folding round lands in.
+//
+// The result is built by reusing the parent's even-index elements rather than by
+// calling NewDomain(d.LogSize-1), which would recompute all 2^(LogSize-1)
+// elements by repeated multiplication. The reuse rests on an identity of
+// gnark-crypto's generator choice that this package does not control:
+//
+//	L_d.Elements[i]^2 == L_(d-1).Elements[i mod 2^(d-1)]
+//
+// equivalently g_(d-1) == g_d^2, where g_d is fft.NewDomain(2^d).Generator. That
+// is not promised by gnark-crypto's API, so TestDomainSquaredMatchesNewDomain and
+// TestGeneratorSquaringIdentity pin it as a regression test; if a dependency bump
+// ever breaks it, those tests fail rather than the folding silently indexing into
+// the wrong domain.
+//
+// A domain of a single element squares to itself.
+func (d *Domain) Squared() (*Domain, error) {
+	if d == nil {
+		return nil, ErrNilDomain
+	}
+	if d.LogSize == 0 {
+		return &Domain{LogSize: 0, Generator: d.Generator, Elements: []fr.Element{fr.One()}}, nil
+	}
+
+	half := len(d.Elements) / 2
+	elements := make([]fr.Element, half)
+	for i := range half {
+		elements[i] = d.Elements[2*i]
+	}
+
+	var gen fr.Element
+	gen.Square(&d.Generator)
+
+	return &Domain{
+		LogSize:   d.LogSize - 1,
+		Generator: gen,
+		Elements:  elements,
+	}, nil
+}
+
 // reverseBits reverses the low numBits bits of x.
 func reverseBits(x, numBits int) int {
 	result := 0

@@ -18,7 +18,8 @@
 10. [Porting Notes: Rust/Pasta to Go/BLS12-381](#10-porting-notes-rustpasta-to-gobls12-381)
 11. [Testing](#11-testing)
 12. [Evaluation](#12-evaluation)
-13. [References](#13-references)
+13. [Folding: Closing the Claim](#13-folding-closing-the-claim)
+14. [References](#14-references)
 
 ---
 
@@ -213,7 +214,13 @@ is correct. A prover free to choose the residual value can prove any sum.
 The caller must check `Expected` against `eq(alpha, R) * f(R)`, with `f(R)` obtained
 from the WHIR oracle rather than from the prover's choice; the `eq` factor the
 verifier computes itself, since `alpha` and `R` are public. Omitting that step leaves
-no soundness at all. Until WHIR lands, this is the caller's responsibility.
+no soundness at all.
+
+**[Section 13](#13-folding-closing-the-claim) does this**, so a caller no longer has to.
+Committing with `CommitGroupWithFold`/`CommitFieldWithFold` makes `VerifyEval`/
+`VerifyEvalGroup` require a folding phase and check the opening against the committed
+coset oracle. `ProveGroupEval`/`VerifyGroupEval` used on their own are still a
+reduction only — the caveat above applies to them as the sum-check primitives they are.
 
 ## 7. Merkle Commitment and the Two Tiers
 
@@ -346,9 +353,9 @@ reproduces the codeword in order, for every `k`.
 
 A commitment here is binding and queryable **by position** of the codeword. It is
 not yet an evaluation proof: nothing in this section shows that `f(z) = v` for a
-claimed `v`. That needs the WHIR folding rounds plus the group sum-check of
-section 6, and is the next step. `Commit` and `Eval` are separate for that reason,
-and "commitment" should not be read as "PCS complete".
+claimed `v`. That needs the group sum-check of section 6 plus the folding rounds of
+[section 13](#13-folding-closing-the-claim). `Commit` and `Eval` are separate for that
+reason, and "commitment" should not be read as "PCS complete".
 
 ---
 
@@ -379,6 +386,13 @@ if err != nil {
 | `NewGenerators(curve, gens)` | `[]bls12381.G1Affine` | `*Generators` | the converted-once generator cache for `Eval` |
 | `Eval` / `VerifyEval` | see [section 12.10](#1210-api) | `*EvalProof` | the field evaluation proof `f(alpha) = sigma` |
 | `EvalGroup` / `VerifyEvalGroup` | see [section 12.10](#1210-api) | `*GroupEvalProof` | the group evaluation proof |
+| `CommitGroupWithFold` / `CommitFieldWithFold` | poly, domain, `k`, `FoldConfig` | commitment + hint | a commitment whose opening is **sound**; see [section 13](#13-folding-closing-the-claim) |
+| `DefaultFoldConfig(m)` | `m` | `FoldConfig` | size-optimal `ell`, rate 1/8, `Q = 43` |
+| `EncodeCosets(p, dom, ell)` | `sumcheck.GroupPoly` | leaves + folded domain | the coset oracle `{f(b, powers(y))}` |
+| `CommitCosets(p, dom, ell)` | `sumcheck.GroupPoly` | `*CosetCommitment` + hint | the Merkle root over cosets |
+| `EncodeGroupOracleAt(p, dom, i)` | poly, domain, index | one `G1Affine` | one codeword point, so the verifier stays sublinear |
+| `VerifyBatch(root, leaves, proof)` | root, leaves, `*BatchProof` | `bool` | the verifier counterpart to `ProveBatch` |
+| `ProveGroupEvalWithTranscript` / `VerifyGroupEvalWithTranscript` | `*csp.Transcript` + the above | as above | chaining the sum-check into the folding phase |
 
 Both encoders take the polynomial types from
 [`crypto/sumcheck`](../../token/core/zkatdlog/nogh/v1/crypto/sumcheck) rather than
@@ -403,7 +417,8 @@ vOpening, err := titan.VerifyGroupEval(curve, proof, alpha, &sigma, titan.Defaul
 if err != nil {
     return errors.Wrap(err, "group sum-check verification failed")
 }
-// The caller MUST still close the reduction: see section 6.5.
+// These are the sum-check primitives, and on their own they only reduce the claim:
+// see section 6.5. Eval/EvalGroup over a CommitGroupWithFold commitment close it.
 ```
 
 `sigma` is returned rather than taken as an argument, since it is determined by `f`
@@ -643,8 +658,16 @@ so the Go verifier must be written from the paper rather than ported.
 | `bridge_test.go` | scalar-field order equality pinned as a regression test; G1 round-trip (generator, scalar multiple, negated); infinity rejected; the offending index named on slice conversion; `Zr` round-trip over `0,1,2,255,256,65535,2^40,r-1` and random; add and mul agreeing across the boundary; all four BLS12-381 curve variants preserving the caller's ID; validation; `padTo32` |
 | `eval_test.go` | round-trip for `m ∈ 2..12` asserting *both* acceptance and `sigma == EvaluatePoint(alpha)`; `sigmaPartial` computed two independent ways; leg independence by grafting legs across two commitments; negatives (wrong `sigma`, tampered `sigmaPartial`, tampered row leg, tampered column leg, reversed `alpha`, a proof for another polynomial); `Generators` round-trip, nil receiver, short prefix, infinity, and cross-curve misuse; `EvalAffine` agreeing with the cached path; `checkShape` including the row-count ambiguity; `foldRows` against a direct restriction; group `EvalGroup` round-trip and negatives; leg-2 transcript separator distinctness and rejection of a foreign-header CSP proof; validation |
 | `eval_bench_test.go` | `Eval` and `VerifyEval` at `m ∈ {8,10,12,14}`; `EvalGroup` at `m ∈ {8,10,12}`; the mathlib boundary for generators and scalars at `n ∈ {16,64,128,256}`; cached vs uncached across prove/verify |
+| `domain_test.go` | `g_(d-1) = g_d^2` and `L_d.Elements[i]^2 = L_(d-1).Elements[i mod 2^(d-1)]` for `d ∈ 2..18` — the unstated gnark-crypto dependency all cross-round index arithmetic rests on; `Squared()` against a freshly built domain |
+| `coset_test.go` | the coset **definition** against an independent `EvaluatePoint` (6 configs); `⟨leaf, eq(r)⟩` equals the reduced codeword; two negatives pinning that the coset oracle is **not** a regrouping or a strided read of the flat codeword; `CommitCosets` round-trip and binding; validation |
+| `foldconfig_test.go` | `Q(λ=128, ρ=1/8) = 43` under capacity and 86 under Johnson; the `DefaultEll` size model; `Validate` over `ell ∈ [1, m/2]`, odd `m`, bad rate and bad query count |
+| `queries_test.go` | determinism; dependence on the transcript; distinctness and range including `n=256, q=43`; domain coverage; exhaustion at `q = n`; validation (nil transcript, non-power-of-two `n`, `q > n`) |
+| `fold_test.go` | round-trip for `m ∈ {4,6,8,10}` × `ell ∈ 1..m/2`; the reduced polynomial against `foldFirstField` applied `ell` times; **a lying prover** whose fold runs over another polynomial; **a foreign fold with genuine openings** (the test that check 3 is load-bearing, with `verifyFoldRoundsOnly` asserting checks 1–2 pass); every query position corrupted in turn, including the last; 11 soundness negatives (tampered leaf/path, wrong index, swapped and permuted queries, tampered/replaced/truncated reduced poly, tampered and dropped round, dropped query); wrong claim; wrong `alpha`; short coset; end-to-end `Eval`/`EvalGroup` with folding at `m ∈ {4,8,12}` incl. anti-downgrade in both directions and the prover-chosen query count; `m ≡ 0 mod 4` on the field path; validation |
+| `fold_bench_test.go` | proof size in **real serialized bytes** vs `ell ∈ 1..6` at `m = 12`; prove and verify at `m ∈ {8,10,12}` |
 
-Statement coverage is **92.6%** overall, race-clean.
+Statement coverage is **91.0%** overall, race-clean. (It moved from 92.6% because the
+folding phase added more error paths than the negatives exercise; the soundness-critical
+branches are covered, and section 13.7 records which mutations confirm that.)
 
 Three tests carry most of the weight:
 
@@ -995,15 +1018,17 @@ bind and no Pedersen tier to open. There is nothing for a second leg to prove.
 
 ### 12.8 What is still open
 
-**Neither verifier is sound against a prover who lies about the oracle.** Both reduce
-the claim to a residual sum-check claim at a random point and stop there, exactly as
-[section 6.5](#65-this-reduces-the-claim-it-does-not-close-it) describes for the
-sum-check alone. Closing it needs the WHIR folding rounds plus Merkle queries at the
-residual point, which is the next step.
+This section previously read "**neither verifier is sound against a prover who lies
+about the oracle**" — both reduced the claim to a residual sum-check claim at a random
+point and stopped there. **[Section 13](#13-folding-closing-the-claim) closes that**, via
+`ℓ` folding rounds, the reduced polynomial sent in plain, and `Q` consistency queries
+against a committed coset oracle.
 
-This is stated in the godoc on `VerifyEval` as well as here, because a caller who
-read a `nil` error as "the evaluation is proved" would be wrong today. The `nil` means
-the reduction holds, not that the oracle was checked.
+The distinction that remains is which constructor was used. A commitment from
+`CommitGroupWithFold`/`CommitFieldWithFold` carries a coset oracle, and its verifier
+*requires* a folding phase; a commitment from plain `CommitGroup`/`CommitField` has
+`Cosets == nil`, and for those a `nil` error still means the reduction holds, not that
+the oracle was checked. Both godocs say so at the function.
 
 Also still open, by design: zero-knowledge (CSP here is the non-ZK variant, tier 1 is
 non-hiding Pedersen, and leg 2's witness is the folded polynomial); `Setup`; batched
@@ -1083,7 +1108,286 @@ difference costs.
 Both verifiers return the residual `*GroupSumCheckOpening` rather than a bare error,
 so the caller has the point and value the oracle queries must be made at.
 
-## 13. References
+## 13. Folding: Closing the Claim
+
+Sections 6.5 and 12.8 named the gap: both verifiers reduced `f̃(α) = σ` to a residual
+claim about a polynomial nobody had queried, so a prover free to choose the residual
+value could prove any sum. This section is what closes it.
+
+The shape, following WHIR: run `ℓ` rounds of folding on the group sum-check, send the
+reduced polynomial's `2^(m−ℓ)` coefficients **in plain**, test the reduced claim
+directly as a dot product against `eq` evaluations, and tie the whole thing to the
+committed oracle with `Q` consistency queries against coset openings.
+
+### 13.1 What a coset is, and why the flat codeword is the wrong object
+
+A coset for a folded-domain point `y` is, by definition
+
+    { f(b, y, y², y⁴, …) : b ∈ {0,1}^ℓ }
+
+— boolean in the first `ℓ` coordinates, powers of `y` in the remaining `m−ℓ`.
+
+The natural-looking shortcut is to reuse `EncodeGroupOracle`, which runs one FFT over
+all of `L` and gives `codeword[i] = f̂(x) = f̃(x, x², x⁴, …)` at `x = ω^i`. The set
+`{x : x^(2^ℓ) = y}` sits at strided indices `{y + b·N/2^ℓ}`, and it **is** the fold's
+dependency closure — so it is easy to believe those entries are the coset. They are
+not. Every entry there is a full power-curve point; none of them is
+`f(b, powers(y))` with `b` boolean. Measured, three attempts to match the strided set
+against the definition scored 0/512, 1/512 and 1/512 — the stray matches being
+coincidences at `b = 0`.
+
+So the coset oracle is built **per slice**: for each `b ∈ {0,1}^ℓ`, encode the slice
+`f(b, ·)` over the folded domain `L^(2^ℓ)`, then gather index `y` across the `2^ℓ`
+resulting codewords. Slice `b` is `f[b + i·2^ℓ]`, because the first `ℓ` variables are
+the **low** index bits. Total work is the same as one big FFT — `2^ℓ` FFTs of size
+`2^(m+logRate−ℓ)`.
+
+`TestEncodeCosetsGivesSemanticCosets` pins the definition directly, against an
+independent `EvaluatePoint`. Two further tests pin the negative, because this is the
+kind of error a round-trip cannot see (a wrong-but-consistent layout verifies against
+itself): `TestEncodeCosetsIsNotARegroupingOfTheFlatCodeword` asserts the two
+constructions are not permutations of each other, and
+`TestEncodeCosetsStridedSetIsNotTheCoset` asserts it over the specific wrong answer.
+
+### 13.2 One primitive serves both checks
+
+With coset dimension `k = ℓ`, the payoff identity is
+
+    ⟨leaf[y], eq(r)⟩  ==  EncodeGroupOracle(reduced)[y]
+
+where `reduced` is `f` with its first `ℓ` variables bound to the round challenges `r`.
+Verified exact on m = 6, 8, 10, 12 and pinned by `TestFoldCosetMatchesReducedCodeword`.
+
+This is why `k = ℓ` is the right choice rather than an arbitrary one: a consistency
+query costs the verifier a **single `eq` dot product**, not `ℓ` fold rounds. The same
+primitive tests the final reduced claim. One operation, two jobs.
+
+It also fixes the folding direction. `foldFirstGroup` substitutes the **first**
+variable, matching the coset slice indexing; reversing the `eq` order is a mutation
+the suite catches (`TestFoldRoundTrip`, `TestFoldRejectsAWrongAlpha`,
+`TestFoldRejectsALyingProver` all fail).
+
+### 13.3 The three verifier checks, and which one closes the gap
+
+`verifyFold` makes three checks, and all three are load-bearing:
+
+| Check | What it tests | Fails without it |
+|---|---|---|
+| 1 | each round message sums to the previous claim | `ErrFoldRoundMismatch` |
+| 2 | `⟨Reduced, eq⟩` equals the residual claim | `ErrReducedClaimMismatch` |
+| 3 | each sampled coset is under the root **and** folds to the reduced codeword | `ErrCosetOpeningInvalid` |
+
+**Check 3 is the one step 13 exists for.** Checks 1 and 2 are internal consistency: a
+prover who folds an entirely different polynomial `f'` and sends `f'`'s reduced
+coefficients satisfies both. Only check 3 ties the folding to the committed oracle.
+
+That distinction is not hypothetical — it was found by mutation. Deleting check 3 left
+the whole suite green, because the test named `TestFoldRejectsALyingProver` was in fact
+being caught by the Merkle check, not by the fold comparison. Closing it needed a
+strictly harder attack: `TestFoldRejectsAForeignFoldWithGenuineOpenings` substitutes
+*genuine* openings of the *real* committed oracle into a proof folded over `f'`, so the
+Merkle paths verify, checks 1 and 2 pass (asserted explicitly via
+`verifyFoldRoundsOnly`), and check 3 is the only thing that can reject. See
+section 13.7.
+
+### 13.4 Soundness, and what is conjectured
+
+Per-query soundness error is the proximity parameter. Under the **capacity** bound it
+is `ρ`; under **Johnson** it is `√ρ`. So
+
+    Q = ⌈λ / log₂(1/ρ)⌉
+
+At `λ = 128`, `ρ = 1/8`: **Q = 43** under capacity, 86 under Johnson. (43, not 42 — 42
+gives 126 bits, and `TestFoldConfigQueryCount` pins the arithmetic.)
+
+**Capacity is conjectured; Johnson is what is provable.** `SoundnessRegime`'s godoc
+says so at the type, not only here, because a caller choosing `Capacity` is choosing a
+conjecture and should not have to read the docs to find that out. `Johnson` is
+selectable for anyone who wants only proven bounds, at 2× the queries.
+
+The other soundness terms are negligible by comparison and do not affect `Q`: the
+folding rounds' Schwartz–Zippel error is ~2^−252, and `|L|/|F|` is ~2^−240. The query
+term dominates, which is why the formula above is the whole story.
+
+### 13.5 `ℓ` is chosen by size, and the choice was measured
+
+Proof size trades off in `ℓ`: larger `ℓ` means fewer reduced coefficients
+(`2^(m−ℓ)`) but larger cosets (`Q·2^ℓ` points). `DefaultEll` picks the minimum.
+
+Rather than trust the size model it was derived from, the optimum was measured on real
+serialized bytes at m = 12 (`BenchmarkFoldProofSize`, counting compressed G1 plus
+digests):
+
+| ℓ | 1 | 2 | **3** | 4 | 5 | 6 |
+|---|---|---|---|---|---|---|
+| bytes | 122184 | 75928 | **58376** | 61368 | 87016 | 148760 |
+
+The minimum is at `ℓ = 3`, and `DefaultEll(12)` returns 3. The user's suggested
+starting point of `ℓ = m/2 − 1` is 5 at m = 12, which measures 49% larger — so the
+size-optimal rule earns its place.
+
+`ℓ` must stay in `[1, m/2]`: `Q` cosets are opened, and beyond `m/2` the coset points
+dominate everything saved.
+
+### 13.6 The verifier must not encode the whole domain
+
+The first working version had the verifier call `EncodeGroupOracle(proof.Reduced,
+folded)` — the full folded codeword — to compare `Q` positions of it. That is
+correct and badly wrong at once:
+
+| m | verify (full encode) | verify (per-point) | prove |
+|---|---|---|---|
+| 8 | 177ms | 19.1ms | 11.1ms |
+| 10 | 402ms | 26.2ms | 65.9ms |
+| 12 | 901ms | 37.7ms | 297ms |
+
+The verifier was **15× slower than its own prover** at m = 8, and linear in the
+polynomial size — the opposite of the point of a polynomial commitment scheme.
+Profiling attributed 80% to `mulGLV` with `EncodeGroupOracle` at 84% cumulative.
+
+`EncodeGroupOracleAt(p, dom, i)` evaluates the codeword at **one** index, building the
+power curve by `m` squarings from `dom.Elements[i]` and taking `⟨p, eq(curve)⟩`. The
+verifier now calls it `Q` times instead of encoding `2^(m−ℓ+logRate)` points. At m = 12
+that is 24× faster, and the growth changes character: 19→26→38ms is the `Q·2^ℓ` MSM
+work plus Merkle paths, no longer the codeword.
+
+`TestEncodeGroupOracleAtMatchesFullEncoding` pins the equivalence against the butterfly
+at every index across six configurations, so the fast path cannot drift from the slow
+one. The full-domain encoder is still the right tool when most of the codeword is
+wanted — the prover uses it.
+
+### 13.7 Mutation testing the folding phase
+
+Eleven mutations were applied. Two real gaps were found; both are now closed, and each
+was confirmed by re-running the mutation.
+
+**Gap 1 — the check that makes step 13 sound was untested.** Covered in 13.3: deleting
+check 3 left the suite green. The lesson is that a soundness test can pass for the
+wrong reason, and only mutation reveals which reason.
+
+**Gap 2 — the verifier could check fewer queries than it sampled.** Making the verifier
+sample `Q−1` indices left the suite green. The reason is subtle and worth recording:
+`sampleQueryIndices` draws sequentially, so sampling `Q−1` returns exactly the first
+`Q−1` of the honest `Q` list. A truncated verifier loop therefore agrees with the
+honest prover on every query it looks at. The existing `len(proof.Queries) != cfg.Queries`
+guard does not help — that bounds what the prover **sends**, and this is about what the
+verifier **reads**. Every other negative test tampered with query `[0]`, which any
+truncation still checks.
+
+`TestFoldChecksEveryQueryNotJustTheFirst` corrupts each query position in turn,
+including the last, and now fails the mutation. The number of queries actually checked
+is the soundness parameter, and losing one silently costs bits no honest-path test can
+see.
+
+**Two equivalent mutants**, recorded rather than papered over:
+
+- Encoding at `q.Index` instead of the locally sampled `idx`. The preceding
+  `q.Index != idx` guard makes these provably the same value, so no test can
+  distinguish them. `idx` is still the better code, because it does not depend on a
+  guard several lines above staying where it is.
+- Deleting the `cfg.CosetSize()` length check. A leaf is hashed whole, so a leaf of the
+  wrong length gives a different digest and `VerifyMerkleProof` rejects it first —
+  verified directly. The check is defence in depth that names the malformed opening,
+  not a soundness gate; `TestFoldRejectsAShortCoset`'s godoc says so explicitly, since a
+  test whose name implies it pins a check it does not pin is worse than no test.
+
+Mutations correctly caught: skipping the Merkle check (5 tests), reversing the `eq`
+order (3), dropping the reduced-claim check, dropping the round-sum check, dropping a
+round, swapping two queries, tampering with the reduced polynomial, and — confirming
+the transcript threading is load-bearing rather than cosmetic — having the verifier use
+an unchained transcript.
+
+### 13.8 Transcript threading, and why not a fresh transcript
+
+`ProveGroupEval`/`VerifyGroupEval` built their transcript as a local and dropped it, and
+`csp.Transcript.fsState` is unexported, so the folding phase could not continue the same
+Fiat–Shamir chain. Both now have `*WithTranscript` variants that accept a
+`*csp.Transcript` and mutate it in place; `Absorb` already mutates, so this is the
+natural shape. The original functions became thin wrappers, so **no existing call site
+changed**.
+
+The rejected alternative was a fresh WHIR transcript absorbing the sum-check's public
+outputs. Its soundness would depend on that absorb list being *complete*, and an
+omission is a silent failure every honest test still passes — the same shape as the
+`evalTranscriptHeader` gap found in step 12's mutation pass (section 12.9). Threading
+gives one unbroken chain with nothing to enumerate.
+
+One ordering detail matters: the prover absorbs **every reduced coefficient before
+sampling query indices**. Sampling first would let the prover see which cosets it had
+to fix up.
+
+### 13.9 The query count lives in the commitment, not the proof
+
+A soundness hole I introduced and caught while wiring the verifier: the first version
+derived the query count as `len(proof.Fold.Queries)`. That lets the prover choose its own
+security level — send one query, have the verifier accept it as the full set, and the
+proof has a few bits of soundness while verifying cleanly.
+
+`CosetCommitment` therefore carries `Fold FoldConfig`, and the verifier reads
+`c.Cosets.Fold`. The count is a security parameter, and a security parameter the prover
+chooses is not one. `TestEvalGroupRejectsAReducedQueryCount` pins it.
+
+The same reasoning drives the **anti-downgrade check in both directions**: if
+`c.Cosets != nil` a fold proof is *required*, and if `c.Cosets == nil` a fold proof is
+*rejected*. Without the first, a prover strips the folding phase and gets the old
+unsound behaviour from a commitment that promised better; without the second, a fold
+proof appears to add assurance against a root that never committed to cosets.
+
+### 13.10 The field path needs `m ≡ 0 mod 4`
+
+Folding attaches to leg 1, which runs over the row variables — so the constraint "`m`
+even" from the folding spec applies to `rowVars = m − m/2`, not to `m`. That makes the
+usable field-path sizes m = 4, 8, 12, … and **excludes m = 6, 10**, where `rowVars` is
+odd. This surfaced as a `DefaultFoldConfig` rejection at m = 6 that looked like a test
+bug and is not; `TestFieldFoldRequiresMDivisibleByFour` pins it, and
+`newFieldFoldFixture`'s godoc explains it at the point of use. The group path, having
+no matrix split, needs only `m` even.
+
+### 13.11 API
+
+    type SoundnessRegime int   // Capacity (conjectured) | Johnson (provable)
+
+    type FoldConfig struct { Ell, LogRate, Queries int; Regime SoundnessRegime }
+    func DefaultFoldConfig(m int) FoldConfig
+    func DefaultEll(m, logRate, q int) int
+    func QueryCount(logRate int, regime SoundnessRegime, lambda int) int
+    func (c FoldConfig) Validate(m int) error
+    func (c FoldConfig) CosetSize() int
+
+    type CosetCommitment struct { Root []byte; NumVars, Ell, LogDomain int; Fold FoldConfig }
+    type CosetOpeningHint struct { ... }
+    func EncodeCosets(p sumcheck.GroupPoly, dom *Domain, ell int) ([][]bls12381.G1Affine, *Domain, error)
+    func CommitCosets(p sumcheck.GroupPoly, dom *Domain, ell int) (*CosetCommitment, *CosetOpeningHint, error)
+    func (h *CosetOpeningHint) OpenCoset(y int) ([]bls12381.G1Affine, *MerkleProof, error)
+
+    type CosetOpening struct { Index int; Leaf []bls12381.G1Affine; Path *MerkleProof }
+    type FoldProof struct {
+        Rounds  [][3]bls12381.G1Affine
+        Reduced sumcheck.GroupPoly
+        Queries []*CosetOpening
+    }
+
+    func CommitGroupWithFold(G sumcheck.GroupPoly, dom *Domain, k int, cfg FoldConfig) (*Commitment, *GroupOpeningHint, error)
+    func CommitFieldWithFold(f sumcheck.FieldPoly, gens []bls12381.G1Affine, dom *Domain, k int, cfg FoldConfig) (*Commitment, *FieldOpeningHint, error)
+
+    func EncodeGroupOracleAt(p sumcheck.GroupPoly, dom *Domain, i int) (bls12381.G1Affine, error)
+    func VerifyBatch(root []byte, leaves [][]bls12381.G1Affine, proof *BatchProof) bool
+
+    func ProveGroupEvalWithTranscript(tr *csp.Transcript, ...) (...)
+    func VerifyGroupEvalWithTranscript(tr *csp.Transcript, ...) (...)
+
+`EvalProof` and `GroupEvalProof` each gain `Fold *FoldProof`. Commit with
+`CommitGroupWithFold`/`CommitFieldWithFold` to get a sound opening; the plain
+`CommitGroup`/`CommitField` still produce a commitment whose `Cosets` is nil, which
+reduces the claim without closing it and now says so in its godoc.
+
+### 13.12 What is still open
+
+Deferred by design, unchanged from section 12.8: zero-knowledge; `Setup`; batched `Eval`
+at several points; serialization; and the `O(n^(1/4))` variant, which needs a second
+folding layer over the *generator* oracle and is not what `k` controls.
+
+## 14. References
 
 - Titan paper — `eprint_version/` in the `titan` project; `group-sum-check.tex`
   covers the group oracle encoding and the efficient group sum-check.

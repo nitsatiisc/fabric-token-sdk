@@ -462,3 +462,59 @@ func TestTreeDepth(t *testing.T) {
 		assert.Equal(t, logN, treeDepth(1<<logN), "treeDepth(2^%d)", logN)
 	}
 }
+
+func TestVerifyBatch(t *testing.T) {
+	leaves := randomLeaves(t, 16, 2)
+	tree, err := BuildTree(leaves)
+	require.NoError(t, err)
+	root := tree.Root()
+
+	indices := []int{0, 5, 15, 5}
+	batch, err := tree.ProveBatch(indices)
+	require.NoError(t, err)
+
+	opened := make([][]bls12381.G1Affine, len(indices))
+	for i, idx := range indices {
+		opened[i] = leaves[idx]
+	}
+	assert.True(t, VerifyBatch(root, opened, batch), "the honest batch should verify")
+
+	t.Run("rejects a tampered leaf", func(t *testing.T) {
+		bad := make([][]bls12381.G1Affine, len(opened))
+		copy(bad, opened)
+		tampered := append([]bls12381.G1Affine{}, opened[2]...)
+		tampered[0].Add(&tampered[0], &tampered[0])
+		bad[2] = tampered
+		assert.False(t, VerifyBatch(root, bad, batch))
+	})
+
+	t.Run("rejects a permuted batch", func(t *testing.T) {
+		// Paths are positional: swapping two openings must not verify, or the batch
+		// would authenticate a multiset rather than an indexed sequence.
+		swapped := append([][]bls12381.G1Affine{}, opened...)
+		swapped[0], swapped[2] = swapped[2], swapped[0]
+		assert.False(t, VerifyBatch(root, swapped, batch))
+	})
+
+	t.Run("rejects a length mismatch", func(t *testing.T) {
+		assert.False(t, VerifyBatch(root, opened[:len(opened)-1], batch))
+	})
+
+	t.Run("rejects a foreign root", func(t *testing.T) {
+		// randomLeaves is deterministic despite its name, so a second call with the
+		// same arguments rebuilds the SAME tree and the same root. Perturb one leaf
+		// to get a genuinely different commitment.
+		otherLeaves := randomLeaves(t, 16, 2)
+		otherLeaves[0][0].Add(&otherLeaves[0][0], &otherLeaves[0][0])
+		other, err := BuildTree(otherLeaves)
+		require.NoError(t, err)
+		require.NotEqual(t, root, other.Root(), "the two trees must differ for this to test anything")
+		assert.False(t, VerifyBatch(other.Root(), opened, batch))
+	})
+
+	t.Run("rejects empty and nil input", func(t *testing.T) {
+		assert.False(t, VerifyBatch(root, nil, batch))
+		assert.False(t, VerifyBatch(root, opened, nil))
+		assert.False(t, VerifyBatch(root, [][]bls12381.G1Affine{}, &BatchProof{}))
+	})
+}

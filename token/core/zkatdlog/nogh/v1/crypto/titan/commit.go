@@ -60,6 +60,20 @@ type Commitment struct {
 	K int
 	// NumLeaves is the leaf count of the tree, |L| / 2^K.
 	NumLeaves int
+
+	// Cosets is the commitment to the coset-wise oracle the folding phase
+	// queries, or nil if the polynomial was committed without one.
+	//
+	// It is a second root rather than a reuse of Root because the two commit
+	// genuinely different values: Root covers the flat codeword, whose entries
+	// are full power-curve points, while Cosets covers the slice-wise oracle
+	// whose leaves are { G(b, powers(y)) }. See EncodeCosets. A verifier that
+	// checked fold openings against Root would reject every honest proof.
+	//
+	// A nil Cosets means Eval/EvalGroup can still reduce a claim but cannot
+	// close it: without the coset oracle there is nothing for the consistency
+	// queries to open. CommitGroupWithFold is the constructor that populates it.
+	Cosets *CosetCommitment
 }
 
 // GroupOpeningHint is the prover's retained state for a group commitment. It is
@@ -73,6 +87,15 @@ type GroupOpeningHint struct {
 	Leaves [][]bls12381.G1Affine
 	// Tree retains every level, so any number of openings are slice reads.
 	Tree *Tree
+
+	// Cosets is the prover state for the coset-wise oracle, or nil if the
+	// polynomial was committed without one. See Commitment.Cosets.
+	Cosets *CosetOpeningHint
+
+	// Fold is the folding configuration the coset oracle was built for. It is
+	// retained because Ell determines the coset shape, so prover and verifier
+	// must agree on it, and the oracle cannot be reinterpreted at another Ell.
+	Fold FoldConfig
 }
 
 // FieldOpeningHint is the prover's retained state for a field commitment: the
@@ -89,10 +112,13 @@ type FieldOpeningHint struct {
 // codeword into cosets of 2^k points, and Merkle-commit the cosets.
 //
 // This is the group polynomial commitment, and it is also tier 2 of the field
-// commitment. k = 0 gives one codeword point per leaf; k > 0 is the coset-wise
-// structure the O(n^(1/4)) variant needs, and is supported here only in the sense
-// that the leaf format allows it -- the folding that exploits it is not yet
-// implemented.
+// commitment. k = 0 gives one codeword point per leaf, which is the shape Eval
+// and EvalGroup use.
+//
+// k > 0 groups the flat codeword into contiguous blocks. That is a storage
+// convention only -- see chunkIntoCosets -- and it is NOT the coset structure the
+// folding phase queries: the folding commits to a separately built oracle, see
+// CommitCosets and EncodeCosets.
 //
 // The returned hint is prover state and must not be given to a verifier.
 func CommitGroup(G sumcheck.GroupPoly, dom *Domain, k int) (*Commitment, *GroupOpeningHint, error) {
@@ -128,6 +154,51 @@ func CommitGroup(G sumcheck.GroupPoly, dom *Domain, k int) (*Commitment, *GroupO
 		NumLeaves: len(leaves),
 	}
 	hint := &GroupOpeningHint{G: G, Codeword: codeword, Leaves: leaves, Tree: tree}
+
+	return c, hint, nil
+}
+
+// CommitGroupWithFold commits a group multilinear together with the coset-wise
+// oracle the folding phase queries, giving an opening that can be *closed* rather
+// than only reduced.
+//
+// CommitGroup alone commits the flat codeword. That is enough to reduce an
+// evaluation claim, but not to close it: the folding phase's consistency queries
+// open cosets, and the cosets are a different object from the flat codeword (see
+// EncodeCosets). This constructor builds both, so Eval and EvalGroup can produce a
+// sound proof.
+//
+// cfg fixes the coset dimension Ell, and Ell is baked into the oracle's shape --
+// the same polynomial committed at a different Ell is a different commitment. Pass
+// DefaultFoldConfig(m) unless there is a reason not to.
+//
+// The two roots are kept separate rather than combined into one tree. Combining
+// them would save a hash but would let a verifier that confused the two accept
+// openings of the wrong oracle, and the failure would look like a soundness bug
+// rather than a plumbing one.
+func CommitGroupWithFold(G sumcheck.GroupPoly, dom *Domain, k int, cfg FoldConfig) (*Commitment, *GroupOpeningHint, error) {
+	m, err := numVarsOf(len(G))
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := cfg.Validate(m); err != nil {
+		return nil, nil, err
+	}
+
+	c, hint, err := CommitGroup(G, dom, k)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	cosetCom, cosetHint, err := CommitCosets(G, dom, cfg.Ell)
+	if err != nil {
+		return nil, nil, errors.Wrap(err, "failed to commit the coset oracle")
+	}
+
+	cosetCom.Fold = cfg
+	c.Cosets = cosetCom
+	hint.Cosets = cosetHint
+	hint.Fold = cfg
 
 	return c, hint, nil
 }
@@ -191,6 +262,46 @@ func CommitField(f sumcheck.FieldPoly, gens []bls12381.G1Affine, dom *Domain, k 
 	return c, hint, nil
 }
 
+// CommitFieldWithFold is CommitField with the coset oracle of tier 2's group
+// polynomial, so the resulting commitment can be opened soundly.
+//
+// The coset oracle is built over G -- the tier-1 row commitments -- not over f,
+// because the folding phase operates on the group polynomial. See
+// CommitGroupWithFold, and note that cfg's Ell is relative to G's variable count
+// (log2 of the row count), not f's.
+func CommitFieldWithFold(f sumcheck.FieldPoly, gens []bls12381.G1Affine, dom *Domain, k int, cfg FoldConfig) (*Commitment, *FieldOpeningHint, error) {
+	c, hint, err := CommitField(f, gens, dom, k)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	if err := cfg.Validate(hint.GroupOpeningHint.numVars()); err != nil {
+		return nil, nil, err
+	}
+
+	cosetCom, cosetHint, err := CommitCosets(hint.G, dom, cfg.Ell)
+	if err != nil {
+		return nil, nil, errors.Wrap(err, "failed to commit the coset oracle")
+	}
+
+	cosetCom.Fold = cfg
+	c.Cosets = cosetCom
+	hint.Cosets = cosetHint
+	hint.Fold = cfg
+
+	return c, hint, nil
+}
+
+// numVars is the number of variables of the committed group polynomial.
+func (h *GroupOpeningHint) numVars() int {
+	n, err := numVarsOf(len(h.G))
+	if err != nil {
+		return 0
+	}
+
+	return n
+}
+
 // OpenLeaf returns the coset at the given leaf index together with its
 // authentication path, which is how a verifier's query on the oracle is answered.
 func (h *GroupOpeningHint) OpenLeaf(index int) ([]bls12381.G1Affine, *MerkleProof, error) {
@@ -208,14 +319,27 @@ func (h *GroupOpeningHint) OpenLeaf(index int) ([]bls12381.G1Affine, *MerkleProo
 	return h.Leaves[index], proof, nil
 }
 
-// chunkIntoCosets groups a codeword into contiguous blocks of 2^k points, one per
-// Merkle leaf.
+// chunkIntoCosets groups a flat codeword into contiguous blocks of 2^k points,
+// one per Merkle leaf.
 //
-// Contiguous, not strided: a coset must be the block of codeword positions that a
-// single folding step consumes together, and with the codeword laid out in the
-// domain order EncodeGroupOracle produces, that block is contiguous. Striding here
-// would still build a valid-looking tree over a reordering of the same points,
-// which is exactly the kind of error no round-trip test can see.
+// Contiguity here is a storage convention, nothing more. An earlier version of
+// this comment claimed contiguous blocks were the set a folding step consumes
+// together; that is FALSE, and it is worth recording because the claim looked
+// plausible. For the flat codeword EncodeGroupOracle produces, the 2^k points a
+// k-round fold depends on are the roots of x^(2^k) = y, which sit at the STRIDED
+// positions {y, y + N/2^k, ...}: taking a 2^k-th root divides the exponent, so
+// the set is closed under multiplication by w^(N/2^k) rather than by w. At d=4,
+// k=2 the coset of w^1 is {1, 5, 9, 13}, while the contiguous block {4,5,6,7}
+// contains just one of its members. (Contiguous WOULD be right for bit-reversed
+// storage, which is the usual WHIR convention; encode.go deliberately returns
+// natural order.)
+//
+// Nothing is broken by that, because this function is only used for k = 0, where
+// every grouping coincides and each leaf is a single codeword point. The folding
+// phase does not regroup this array at all -- it commits to a different oracle
+// built slice-wise by EncodeCosets, whose leaves hold G(b, powers(y)) rather than
+// power-curve points. See EncodeCosets for why the two are not reorderings of
+// each other.
 func chunkIntoCosets(codeword []bls12381.G1Affine, k int) ([][]bls12381.G1Affine, error) {
 	if k < 0 {
 		return nil, errors.Wrapf(ErrInvalidCosetDim, "coset dimension %d is negative", k)

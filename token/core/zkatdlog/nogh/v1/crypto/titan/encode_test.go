@@ -343,3 +343,55 @@ func TestEncodeValidation(t *testing.T) {
 		require.ErrorIs(t, err, ErrDomainTooSmall)
 	})
 }
+
+// TestEncodeGroupOracleAtMatchesFullEncoding pins that the single-point encoder and
+// the bulk butterfly compute the same codeword.
+//
+// This is the identity the folding verifier rests on: it checks Q queries with
+// EncodeGroupOracleAt instead of encoding the whole domain, so any disagreement
+// between the two would make honest proofs fail -- or, worse, make dishonest ones
+// pass against a codeword nobody else computes the same way.
+func TestEncodeGroupOracleAtMatchesFullEncoding(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct{ m, logRate int }{
+		{1, 1}, {2, 1}, {3, 3}, {4, 2}, {5, 1}, {6, 3},
+	} {
+		dom, err := NewDomain(tc.m + tc.logRate)
+		require.NoError(t, err)
+
+		p := randomGroupPoly(t, tc.m)
+
+		full, err := EncodeGroupOracle(p, dom)
+		require.NoError(t, err)
+
+		for i := range dom.Size() {
+			got, err := EncodeGroupOracleAt(p, dom, i)
+			require.NoError(t, err)
+			require.True(t, got.Equal(&full[i]),
+				"m=%d logRate=%d index %d: single-point encoding differs from the butterfly",
+				tc.m, tc.logRate, i)
+		}
+	}
+}
+
+// TestEncodeGroupOracleAtValidation covers the guards.
+func TestEncodeGroupOracleAtValidation(t *testing.T) {
+	t.Parallel()
+
+	dom, err := NewDomain(4)
+	require.NoError(t, err)
+	p := randomGroupPoly(t, 2)
+
+	_, err = EncodeGroupOracleAt(nil, dom, 0)
+	require.ErrorIs(t, err, ErrNilPolynomial)
+
+	_, err = EncodeGroupOracleAt(p, nil, 0)
+	require.ErrorIs(t, err, ErrNilDomain)
+
+	_, err = EncodeGroupOracleAt(p, dom, -1)
+	require.ErrorIs(t, err, ErrLeafIndexOutOfRange)
+
+	_, err = EncodeGroupOracleAt(p, dom, dom.Size())
+	require.ErrorIs(t, err, ErrLeafIndexOutOfRange)
+}

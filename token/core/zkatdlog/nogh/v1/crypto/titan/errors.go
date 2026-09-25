@@ -101,6 +101,37 @@ var (
 	// supplied than the row length of the matrix form of the polynomial.
 	ErrInsufficientGenerators = errors.New("not enough generators to commit a row")
 
+	// ErrInvalidFoldConfig indicates that a FoldConfig is not usable: ell outside
+	// [1, m/2], a non-positive rate or query count, or an odd number of variables.
+	ErrInvalidFoldConfig = errors.New("invalid fold configuration")
+
+	// ErrFoldRoundMismatch indicates that a fold proof does not carry exactly one
+	// round message per folding round, or that a round message is inconsistent
+	// with the claim the previous round left.
+	ErrFoldRoundMismatch = errors.New("fold proof round count or round check failed")
+
+	// ErrReducedPolyMismatch indicates that the reduced polynomial sent in plain
+	// does not have the 2^(m-ell) coefficients the configuration implies.
+	ErrReducedPolyMismatch = errors.New("reduced polynomial has the wrong length")
+
+	// ErrReducedClaimMismatch indicates that the dot product of the reduced
+	// polynomial with the eq table does not equal the claim the folding rounds
+	// left. The folding is internally consistent but opens to the wrong value.
+	ErrReducedClaimMismatch = errors.New("reduced claim does not match the folded claim")
+
+	// ErrCosetOpeningInvalid indicates that a consistency query failed: the coset
+	// does not lie under the committed Merkle root, or the coset folds to a value
+	// other than the reduced polynomial's codeword at that index.
+	//
+	// This is the error that catches a prover who committed to one polynomial and
+	// ran the folding over another.
+	ErrCosetOpeningInvalid = errors.New("coset consistency query failed")
+
+	// ErrQueryCountMismatch indicates that a fold proof does not carry the number
+	// of consistency queries the configuration requires. Accepting fewer would
+	// lower the soundness of the proof below its stated level.
+	ErrQueryCountMismatch = errors.New("fold proof query count does not match configuration")
+
 	// ErrPointAtInfinity indicates that the point at infinity was supplied where
 	// a non-identity point is required. Crossing into mathlib for the CSP linear
 	// form, an identity generator would collapse the commitment scheme, and CSP

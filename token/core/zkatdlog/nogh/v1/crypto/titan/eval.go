@@ -193,6 +193,15 @@ type EvalProof struct {
 
 	// ColProof is leg 2, the CSP linear-form proof.
 	ColProof *csp.Proof
+
+	// Fold closes leg 1 against the committed coset oracle, or is nil if the
+	// commitment carried no coset oracle.
+	//
+	// Leg 1 reduces "G sums to SigmaPartial" to a residual claim; leg 2 opens
+	// SigmaPartial against the generators. Neither ties SigmaPartial to the
+	// commitment -- Fold is what does, so without it the two legs prove an
+	// evaluation of a polynomial nobody committed. See FoldProof.
+	Fold *FoldProof
 }
 
 // GroupEvalProof is a proof that a committed *group* multilinear evaluates to a
@@ -212,6 +221,14 @@ type GroupEvalProof struct {
 	// Opening is the residual claim, retained for the caller's use; see the note
 	// on closing it in VerifyEvalGroup.
 	Opening *GroupSumCheckOpening
+
+	// Fold closes the claim against the committed coset oracle, or is nil if the
+	// commitment carried no coset oracle.
+	//
+	// Without it the proof only *reduces* the claim: RowProof shows the sum
+	// follows from Opening, and nothing ties Opening to the commitment. Fold is
+	// what makes the proof binding -- see FoldProof and verifyFold.
+	Fold *FoldProof
 }
 
 // Eval proves that the committed field multilinear evaluates to sigma at alpha,
@@ -270,9 +287,23 @@ func (h *FieldOpeningHint) Eval(curve *mathlib.Curve, gens *Generators, alpha []
 	// Leg 1: the group sum-check produces sigmaPartial as its asserted sum, so it
 	// is not computed separately here -- deriving it twice would let the two
 	// derivations disagree silently.
-	rowProof, rowOpening, sigmaPartial, err := ProveGroupEval(curve, h.G, alphaRow, DefaultSplit(len(alphaRow)))
+	rowEll := DefaultSplit(len(alphaRow))
+	rowTr := newGroupSumCheckTranscript(curve, len(alphaRow), rowEll, alphaRow)
+
+	rowProof, rowOpening, sigmaPartial, err := ProveGroupEvalWithTranscript(rowTr, curve, h.G, alphaRow, rowEll)
 	if err != nil {
 		return nil, sigma, errors.Wrap(err, "failed to prove the row leg")
+	}
+
+	// The folding phase, on leg 1's transcript so its challenges depend on every
+	// round message. Skipped when the commitment carried no coset oracle, in which
+	// case the proof reduces the claim without closing it; VerifyEval says so.
+	var foldProof *FoldProof
+	if h.Cosets != nil {
+		foldProof, err = proveFold(rowTr, h.G, h.Cosets, h.Fold, alphaRow, &sigmaPartial)
+		if err != nil {
+			return nil, sigma, errors.Wrap(err, "failed to prove the folding phase")
+		}
 	}
 
 	// Leg 2: the CSP linear form, in mathlib.
@@ -286,6 +317,7 @@ func (h *FieldOpeningHint) Eval(curve *mathlib.Curve, gens *Generators, alpha []
 		RowProof:     rowProof,
 		RowOpening:   rowOpening,
 		ColProof:     colProof,
+		Fold:         foldProof,
 	}, sigma, nil
 }
 
@@ -342,9 +374,27 @@ func VerifyEval(curve *mathlib.Curve, c *Commitment, gens *Generators, alpha []f
 	alphaCol, alphaRow := splitAlpha(alpha, m)
 
 	// Leg 1: the row sum-check, asserting the sum is SigmaPartial.
-	opening, err := VerifyGroupEval(curve, proof.RowProof, alphaRow, &proof.SigmaPartial, DefaultSplit(len(alphaRow)))
+	rowEll := DefaultSplit(len(alphaRow))
+	rowTr := newGroupSumCheckTranscript(curve, len(alphaRow), rowEll, alphaRow)
+
+	opening, err := VerifyGroupEvalWithTranscript(rowTr, curve, proof.RowProof, alphaRow, &proof.SigmaPartial, rowEll)
 	if err != nil {
 		return nil, errors.Wrap(err, "the row leg does not verify")
+	}
+
+	// The folding phase, which is what binds SigmaPartial to the commitment. As in
+	// VerifyEvalGroup, a commitment carrying a coset oracle REQUIRES a fold proof:
+	// otherwise omitting the field would downgrade a sound commitment.
+	switch {
+	case c.Cosets != nil:
+		if proof.Fold == nil {
+			return nil, errors.Wrap(ErrNilProof, "the commitment carries a coset oracle but the proof has no folding phase")
+		}
+		if err := verifyFold(rowTr, c.Cosets, c.Cosets.Fold, alphaRow, &proof.SigmaPartial, proof.Fold); err != nil {
+			return nil, errors.Wrap(err, "the folding phase does not verify")
+		}
+	case proof.Fold != nil:
+		return nil, errors.Wrap(ErrNilProof, "the proof carries a folding phase but the commitment has no coset oracle")
 	}
 
 	// Leg 2: the column CSP proof, against the same SigmaPartial. The verifier
@@ -368,12 +418,31 @@ func (h *GroupOpeningHint) EvalGroup(curve *mathlib.Curve, alpha []fr.Element) (
 		curve = bridgeCurve()
 	}
 
-	proof, opening, sigma, err := ProveGroupEval(curve, h.G, alpha, DefaultSplit(len(alpha)))
+	ell := DefaultSplit(len(alpha))
+
+	// One transcript for both phases. The fold challenges and query indices then
+	// depend on every sum-check message, so a prover cannot pick its polynomial
+	// after seeing which cosets will be opened.
+	tr := newGroupSumCheckTranscript(curve, len(alpha), ell, alpha)
+
+	proof, opening, sigma, err := ProveGroupEvalWithTranscript(tr, curve, h.G, alpha, ell)
 	if err != nil {
 		return nil, sigma, errors.Wrap(err, "failed to prove the group evaluation")
 	}
 
-	return &GroupEvalProof{RowProof: proof, Opening: opening}, sigma, nil
+	out := &GroupEvalProof{RowProof: proof, Opening: opening}
+
+	// The folding phase closes sigma against the oracle. A hint without a coset
+	// oracle can still reduce the claim, so this is skipped rather than an error;
+	// VerifyEvalGroup says so in its contract.
+	if h.Cosets != nil {
+		out.Fold, err = proveFold(tr, h.G, h.Cosets, h.Fold, alpha, &sigma)
+		if err != nil {
+			return nil, sigma, errors.Wrap(err, "failed to prove the folding phase")
+		}
+	}
+
+	return out, sigma, nil
 }
 
 // VerifyEvalGroup checks a GroupEvalProof against the claim G(alpha) = sigma and
@@ -399,9 +468,31 @@ func VerifyEvalGroup(curve *mathlib.Curve, c *Commitment, alpha []fr.Element, si
 		return nil, errors.Wrapf(ErrNumVarsMismatch, "commitment is over %d variables, alpha has %d coordinates", c.NumVars, len(alpha))
 	}
 
-	opening, err := VerifyGroupEval(curve, proof.RowProof, alpha, sigma, DefaultSplit(len(alpha)))
+	ell := DefaultSplit(len(alpha))
+	tr := newGroupSumCheckTranscript(curve, len(alpha), ell, alpha)
+
+	opening, err := VerifyGroupEvalWithTranscript(tr, curve, proof.RowProof, alpha, sigma, ell)
 	if err != nil {
 		return nil, errors.Wrap(err, "the group evaluation does not verify")
+	}
+
+	// The commitment says whether this claim can be closed. If it carries a coset
+	// oracle then a fold proof is REQUIRED: treating a missing one as acceptable
+	// would let a prover downgrade a sound commitment to an unsound opening simply
+	// by omitting a field.
+	switch {
+	case c.Cosets != nil:
+		if proof.Fold == nil {
+			return nil, errors.Wrap(ErrNilProof, "the commitment carries a coset oracle but the proof has no folding phase")
+		}
+		// The configuration -- crucially the query count -- comes from the
+		// commitment, which was fixed before any challenge was drawn. Deriving it
+		// from the proof would make the security level the prover's choice.
+		if err := verifyFold(tr, c.Cosets, c.Cosets.Fold, alpha, sigma, proof.Fold); err != nil {
+			return nil, errors.Wrap(err, "the folding phase does not verify")
+		}
+	case proof.Fold != nil:
+		return nil, errors.Wrap(ErrNilProof, "the proof carries a folding phase but the commitment has no coset oracle")
 	}
 
 	return opening, nil
