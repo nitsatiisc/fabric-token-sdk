@@ -1596,6 +1596,7 @@ whose failures are silent.
     func NewFieldProver(setup *FieldSetup, st FieldStatement, w FieldWitness) (*FieldProver, error)
     func (p *FieldProver) Commitment() *Commitment
     func (p *FieldProver) Prove() (*EvalProof, fr.Element, error)
+    func (p *FieldProver) ProveAt(alpha []fr.Element) (*EvalProof, fr.Element, error)
 
     func NewFieldVerifier(setup *FieldSetup, st FieldStatement, com *Commitment) (*FieldVerifier, error)
     func (v *FieldVerifier) Verify(proof *EvalProof, sigma fr.Element) int
@@ -1604,6 +1605,33 @@ whose failures are silent.
 The group path is the same with `GroupSetup`/`GroupStatement`/`GroupWitness`,
 `NewGroupSetup(numVars, curve, cfg)` (no generators — the group commitment is tier 2
 alone), and `Prove() (*GroupEvalProof, bls12381.G1Affine, error)`.
+
+**The fold path does not encode the flat codeword.** `CommitGroupWithFold` and
+`CommitFieldWithFoldAt` used to run the `commitGroup` stage, a full Reed–Solomon
+encoding of `G`, and then `CommitCosets`, which encodes `G` again slice-wise for the
+coset oracle. Nothing reads the flat codeword: the fold opens only the coset oracle,
+and `EncodeCosets` does not regroup the flat codeword (see
+`TestEncodeCosetsIsNotARegroupingOfTheFlatCodeword`). Profiling the pivot protocol
+showed the unused encoding was about 60% of a group commitment. The fold path now
+uses `groupShape`, which runs the same validation and fills the same shape fields
+without encoding. The commitment is byte-for-byte what it was
+(`TestCommitGroupWithFoldSkipsOnlyTheFlatEncoding`,
+`TestCommitFieldWithFoldSkipsOnlyTheFlatEncoding`). The fold path's hint now has a nil
+`Codeword` and `Leaves`. The `commitGroup` and `commitField` stages still encode, for
+the tests that pin them.
+
+**Committing before the point is known.** Both provers also have
+`ProveAt(alpha []fr.Element)`, and both constructors accept a statement with a nil
+`Alpha`. A protocol that commits first and derives its evaluation point from later
+challenges — every sum-check-based argument, including [the pivot
+protocol](pivot.md) — cannot supply the point at construction, since the commitment
+must be bound before the challenges exist. It builds the prover with no point and
+opens with `ProveAt` once the point is known; `Prove` then returns
+`ErrNumVarsMismatch`. The commitment does not depend on the point, so one commitment
+opens at any number of points and the opening hint is not modified. What keeps this
+sound is the caller's transcript: the point must come from challenges drawn after the
+commitment was absorbed. `TestFieldPCSProveAtDeferredPoint` and
+`TestGroupPCSProveAtDeferredPoint` open one commitment at three points.
 
 **The four decisions it hides.**
 

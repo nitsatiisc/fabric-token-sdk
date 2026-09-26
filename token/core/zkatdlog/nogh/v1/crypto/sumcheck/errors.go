@@ -74,4 +74,8 @@ var (
 	// the claim being verified, for example a group proof checked against a
 	// field-only claim.
 	ErrMixedProofKind = errors.New("proof kind does not match claim")
+
+	// ErrFactorIndex indicates that a MultiClaim term names a pool polynomial that
+	// does not exist.
+	ErrFactorIndex = errors.New("term factor index out of range")
 )

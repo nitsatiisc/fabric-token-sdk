@@ -221,12 +221,19 @@ type FieldProver struct {
 //
 // This is the expensive call: it encodes the polynomial over the evaluation domain
 // and builds the coset Merkle tree. Prove itself is comparatively cheap.
+//
+// st.Alpha may be nil. A protocol that commits first and learns its evaluation
+// point only later -- because the point is derived from challenges that must come
+// after the commitment -- constructs the prover with a nil Alpha and opens with
+// ProveAt once the point is known. Prove then refuses to run.
 func NewFieldProver(setup *FieldSetup, st FieldStatement, w FieldWitness) (*FieldProver, error) {
 	if setup == nil {
 		return nil, errors.Wrap(ErrNilElement, "setup is required")
 	}
-	if err := setup.checkAlpha(st.Alpha); err != nil {
-		return nil, err
+	if st.Alpha != nil {
+		if err := setup.checkAlpha(st.Alpha); err != nil {
+			return nil, err
+		}
 	}
 	if err := setup.checkPoly(len(w.Poly)); err != nil {
 		return nil, err
@@ -255,7 +262,24 @@ func (p *FieldProver) Prove() (*EvalProof, fr.Element, error) {
 	if p == nil {
 		return nil, fr.Element{}, errors.Wrap(ErrNilElement, "prover is required")
 	}
-	return p.hint.Eval(p.setup.curve, p.setup.gens, p.st.Alpha)
+	return p.ProveAt(p.st.Alpha)
+}
+
+// ProveAt is Prove at a point chosen after the commitment was made.
+//
+// The commitment does not depend on the point, so one committed polynomial can be
+// opened at any point, and at several. The opening hint is not modified. What
+// makes this safe in a larger protocol is the caller's transcript: the point must
+// be fixed by challenges drawn after the commitment was bound, or the prover could
+// pick a point to suit a false claim.
+func (p *FieldProver) ProveAt(alpha []fr.Element) (*EvalProof, fr.Element, error) {
+	if p == nil {
+		return nil, fr.Element{}, errors.Wrap(ErrNilElement, "prover is required")
+	}
+	if err := p.setup.checkAlpha(alpha); err != nil {
+		return nil, fr.Element{}, err
+	}
+	return p.hint.Eval(p.setup.curve, p.setup.gens, alpha)
 }
 
 // FieldVerifier checks field evaluation proofs against one commitment and point.
@@ -400,13 +424,16 @@ type GroupProver struct {
 // NewGroupProver commits to the witness and prepares to prove the statement.
 //
 // As on the field path the commitment is always made WITH folding, and this is the
-// expensive call rather than Prove.
+// expensive call rather than Prove. st.Alpha may be nil, in which case the prover
+// opens with ProveAt; see NewFieldProver.
 func NewGroupProver(setup *GroupSetup, st GroupStatement, w GroupWitness) (*GroupProver, error) {
 	if setup == nil {
 		return nil, errors.Wrap(ErrNilElement, "setup is required")
 	}
-	if err := setup.checkAlpha(st.Alpha); err != nil {
-		return nil, err
+	if st.Alpha != nil {
+		if err := setup.checkAlpha(st.Alpha); err != nil {
+			return nil, err
+		}
 	}
 	if err := setup.checkPoly(len(w.Poly)); err != nil {
 		return nil, err
@@ -431,7 +458,20 @@ func (p *GroupProver) Prove() (*GroupEvalProof, bls12381.G1Affine, error) {
 	if p == nil {
 		return nil, bls12381.G1Affine{}, errors.Wrap(ErrNilElement, "prover is required")
 	}
-	return p.hint.EvalGroup(p.setup.curve, p.st.Alpha)
+	return p.ProveAt(p.st.Alpha)
+}
+
+// ProveAt is Prove at a point chosen after the commitment was made, with the same
+// caveat as FieldProver.ProveAt: the point must come from challenges drawn after
+// the commitment was bound into the caller's transcript.
+func (p *GroupProver) ProveAt(alpha []fr.Element) (*GroupEvalProof, bls12381.G1Affine, error) {
+	if p == nil {
+		return nil, bls12381.G1Affine{}, errors.Wrap(ErrNilElement, "prover is required")
+	}
+	if err := p.setup.checkAlpha(alpha); err != nil {
+		return nil, bls12381.G1Affine{}, err
+	}
+	return p.hint.EvalGroup(p.setup.curve, alpha)
 }
 
 // GroupVerifier checks group evaluation proofs against one commitment and point.

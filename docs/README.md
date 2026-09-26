@@ -17,6 +17,8 @@ Welcome to Panurus documentation.
 
 *   [**Sum-Check Protocol**](crypto/sumcheck.md): Field and group sum-check over BLS12-381 G1, used to reduce a claim about a hypercube sum to a single evaluation.
 *   [**Titan Polynomial Commitment Scheme**](crypto/titan.md): Multilinear PCS for both field and group polynomials, combining Pedersen commitments to the witness matrix with a WHIR-style IOPP over group elements.
+*   [**Pivot Aggregation Protocol**](crypto/pivot.md): Aggregates K instances of a mixed field/group relation into one proof with four sum-checks and one Titan opening per commitment.
+*   [**Aggregated UTXO Transfers**](crypto/pivot-utxo.md): One proof for K zkatdlog transfers (type-and-sum, range and IdemixNym ownership), with a benchmark against K naive transfers.
 *   [**Titan PCS: Interface Reference**](crypto/titan-pcs-api.md): The public API of the Titan PCS — setup, prover, verifier, the matrix split, fold configuration, and which polynomial sizes are usable.
 *   [**Titan PCS: Cryptography as Implemented**](crypto/titan-crypto.tex) (LaTeX): The construction in mathematical notation — the two-tier commitment, the two evaluation legs, the folding phase, and the deliberate departures from the Titan paper.
 
