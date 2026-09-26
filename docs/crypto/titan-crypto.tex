@@ -1,0 +1,304 @@
+% Copyright IBM Corp. All Rights Reserved.
+% SPDX-License-Identifier: Apache-2.0
+%
+% Titan PCS -- the cryptography as implemented in
+% token/core/zkatdlog/nogh/v1/crypto/titan.
+%
+% Self-contained: standard classes only, no dependency on the Titan paper's
+% private macro set. Build with pdflatex.
+
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage[hidelinks]{hyperref}
+
+\newcommand{\F}{\mathbb{F}}
+\newcommand{\G}{\mathbb{G}}
+\newcommand{\dom}{\mathcal{L}}
+\newcommand{\bin}[1]{\langle #1 \rangle}
+\newcommand{\eq}{\widetilde{\mathrm{eq}}}
+\newcommand{\Com}{\mathsf{Com}}
+\newcommand{\paper}[1]{\textsf{[Titan, #1]}}
+
+\theoremstyle{definition}
+\newtheorem{remark}{Remark}
+
+\title{Titan PCS: the cryptography as implemented}
+\author{Panurus \textemdash\ \texttt{crypto/titan}}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\noindent
+This note describes the Titan polynomial commitment scheme \emph{as implemented} in
+the Panurus \texttt{crypto/titan} package: what is committed, what the evaluation
+proof consists of, and which check makes the opening binding. It follows the Titan
+paper's construction and cites its sections, but it documents the code, so it also
+records where the implementation deliberately departs from the paper and what it does
+not yet do. It is not a security proof; for that, see the paper.
+\end{abstract}
+
+\section{Setting and notation}
+
+Work over BLS12-381: $\F$ is the scalar field $\F_r$, and $\G$ is $\mathbb{G}_1$
+written additively. A multilinear polynomial in $m$ variables is given by its
+$2^m$ evaluations on $\{0,1\}^m$; we write $\widetilde{f}$ for the multilinear
+extension and $\bin{i}$ for the binary decomposition of $i$ into the relevant number
+of bits. As usual,
+\[
+  \eq(\vec X, \vec Y) = \prod_{j} \bigl( X_j Y_j + (1-X_j)(1-Y_j) \bigr),
+  \qquad
+  \widetilde{f}(\vec\alpha) = \sum_{\vec x \in \{0,1\}^m} \eq(\vec\alpha, \vec x)\, \widetilde{f}(\vec x).
+\]
+A \emph{group multilinear} is the same object with coefficients in $\G$; its
+evaluation is a group element, computed by multi-scalar multiplication.
+
+$\dom \subset \F^\ast$ is a smooth multiplicative subgroup of order $2^d$, used as the
+Reed--Solomon evaluation domain. The rate is $\rho = 2^{-\mathsf{LogRate}}$, and
+$\mathsf{LogRate} = 3$ by default, so $\rho = 1/8$.
+
+\begin{remark}[a notation collision worth flagging]
+The paper writes the committed matrix as $p \times q$ with variable blocks
+$\ell_p, \ell_q$, and separately uses $m_1 := |\mathcal{K}_1|$ for a \emph{Merkle leaf
+count} \paper{\S\,titan-commit}. The implementation's \texttt{Split.M1} is
+\emph{unrelated} to that $m_1$: it is the number of \emph{column} variables of the
+matrix, the paper's $\ell_q$. The leaf count appears in the code as
+\texttt{Commitment.NumLeaves}.
+\end{remark}
+
+\section{The two-tier commitment}
+\label{sec:commit}
+
+Following \paper{\S\,titan-commit}, a scalar multilinear $\widetilde{f}$ in $m$
+variables is read as a matrix. Let $\mathsf{M1}$ be the number of column variables and
+$\mathsf{RowVars} = m - \mathsf{M1}$ the number of row variables, giving a
+$2^{\mathsf{RowVars}} \times 2^{\mathsf{M1}}$ matrix and the decomposition
+\begin{equation}
+  \widetilde{f}(\vec X, \vec Y) \;=\; \sum_{i=0}^{2^{\mathsf{RowVars}}-1}
+    \eq\bigl(\vec X, \bin{i}\bigr) \cdot \widetilde{f}\bigl(\bin{i}, \vec Y\bigr),
+  \label{eq:decompose}
+\end{equation}
+where $\vec X$ ranges over the row variables and $\vec Y$ over the column variables.
+
+\paragraph{Tier 1: Pedersen rows.}
+With generators $g_0, \dots, g_{2^{\mathsf{M1}}-1} \in \G$, each row is committed as
+\begin{equation}
+  G_i \;=\; \Com\bigl(\widetilde{f}(\bin{i}, \cdot)\bigr)
+        \;=\; \sum_{j=0}^{2^{\mathsf{M1}}-1} \widetilde{f}\bigl(\bin{i}, \bin{j}\bigr) \cdot g_j .
+  \label{eq:rowcommit}
+\end{equation}
+This is one MSM of length $2^{\mathsf{M1}}$ per row. The $2^{\mathsf{RowVars}}$ results
+are the coefficients of a \emph{group} multilinear
+\begin{equation}
+  \widetilde{G}(\vec X) \;=\; \sum_i \eq\bigl(\vec X, \bin{i}\bigr) \cdot G_i
+  \label{eq:Gmle}
+\end{equation}
+in $\mathsf{RowVars}$ variables. Everything downstream is about $\widetilde G$; the
+scalar polynomial appears again only in leg~2 of the evaluation proof.
+
+\paragraph{Tier 2: encode and Merkle-commit.}
+$\widetilde G$ is Reed--Solomon encoded over $\dom$ of size
+$2^{\mathsf{RowVars} + \mathsf{LogRate}}$ along the \emph{power curve}: the codeword at
+$x \in \dom$ is
+\begin{equation}
+  \widehat{G}(x) \;=\; \widetilde{G}\bigl(x, x^2, x^4, \dots, x^{2^{\mathsf{RowVars}-1}}\bigr),
+  \label{eq:powercurve}
+\end{equation}
+computed by a butterfly recursion \paper{\S\,whir-oracle-algo}. This codeword is
+\emph{not} committed: see the remark at the end of this section.
+
+\paragraph{The coset oracle.}
+The folding phase queries a \emph{second}, differently shaped commitment. For
+$\ell$ folding rounds, a coset indexed by $y$ is
+\begin{equation}
+  \mathcal{C}_y \;=\; \bigl\{\, \widetilde{G}(\vec b,\, y, y^2, y^4, \dots) \;:\; \vec b \in \{0,1\}^{\ell} \,\bigr\},
+  \label{eq:coset}
+\end{equation}
+boolean in the first $\ell$ coordinates and on the power curve in the rest. It is built
+per slice: slice $\vec b$ is encoded over the folded domain $\dom^{2^\ell}$, and leaf
+$y$ gathers index $y$ across the $2^\ell$ resulting codewords. These leaves form a
+second Merkle tree, \texttt{Commitment.Cosets}.
+
+These leaves form the Merkle tree, \texttt{Commitment.Cosets}, and it is the
+\emph{only} commitment in the scheme.
+
+\begin{remark}[one root, not two]
+\label{rem:oneroot}
+\eqref{eq:powercurve} and \eqref{eq:coset} are genuinely different objects --- a point
+of the flat codeword versus a set of slice evaluations --- and an earlier version of
+this implementation Merkle-committed \emph{both}, on the reasoning that a verifier
+confusing them should fail loudly. But nothing ever verified against the flat root:
+the folding phase of \S\ref{sec:fold} is the only stage that opens the oracle, and it
+opens cosets. The flat encoding is a computational stepping stone to \eqref{eq:coset},
+not a commitment anyone opens. Its tree is therefore no longer built, and
+\texttt{Commitment.Root} is retained as a reserved, always-nil field --- an exported
+root that binds nothing is a hazard, not a safeguard.
+\end{remark}
+
+\section{The evaluation proof}
+\label{sec:eval}
+
+To open $\widetilde f(\vec\alpha) = \sigma$, split $\vec\alpha$ at $\mathsf{M1}$ into
+$\vec\alpha_{\mathrm{col}}$ (the first $\mathsf{M1}$ coordinates) and
+$\vec\alpha_{\mathrm{row}}$. Substituting into \eqref{eq:decompose},
+\[
+  \widetilde f(\vec\alpha)
+  = \sum_i \eq(\vec\alpha_{\mathrm{row}}, \bin i) \cdot \widetilde f(\bin i, \vec\alpha_{\mathrm{col}}),
+\]
+which the proof establishes in two legs \paper{\S\,titan-eval-proof}.
+
+\paragraph{Leg 1 (group): $\widetilde G(\vec\alpha_{\mathrm{row}})$.}
+A group sum-check over $\mathsf{RowVars}$ variables proves
+$\sum_{\vec x} \eq(\vec\alpha_{\mathrm{row}}, \vec x)\, \widetilde G(\vec x) = \Sigma$
+for a claimed $\Sigma \in \G$ \paper{\S\,group-sum-check}. Round messages are group
+elements; the prover splits the work between an MSM part and a folklore part at a
+tunable point.
+
+\paragraph{Leg 2 (scalar): the partial evaluation.}
+Leg~1 reduces to a claim about $\widetilde G$ at a transcript-derived point, which by
+\eqref{eq:rowcommit} is a Pedersen commitment to a row combination. Leg~2 proves that
+this commitment opens to the scalar vector
+$\widetilde f(\cdot, \vec\alpha_{\mathrm{col}})$ via the CSP inner-product argument
+\paper{\S\,partial-eval-csp}, and the linear form it checks pins $\sigma$
+\paper{\S\,check-C}. This leg is \emph{not} folded here (see
+\S\ref{sec:notdone}), so its cost is linear in $2^{\mathsf{M1}}$ --- which is why the
+implementation keeps the column half small.
+
+\begin{remark}[$\eq$ factorizes over \emph{any} split, and that is a trap]
+\label{rem:eqtrap}
+For any cut point, $\eq(\vec\alpha,\vec x)$ factorizes into a column part and a row
+part. So a prover and a verifier that both split $\vec\alpha$ at the \emph{wrong} place
+--- or at the same wrong place --- produce a proof that verifies against itself, for a
+different polynomial. Acceptance cannot detect this. The implementation therefore
+records the split in the commitment (\texttt{ColVars}) and cross-checks it, and its
+tests assert $\sigma$ against an independent reference evaluator rather than relying on
+a round trip.
+\end{remark}
+
+\section{The folding phase, and what makes the opening binding}
+\label{sec:fold}
+
+Legs 1 and 2 reduce the claim to a statement about a polynomial \emph{the verifier has
+never queried}. Without more, a prover could commit to one polynomial and run the
+reduction over another. The folding phase closes that gap.
+
+Over $\ell$ rounds the claim is folded, one variable per round, against transcript
+challenges. After the last round the prover sends the \emph{reduced} group multilinear
+--- all $2^{\mathsf{RowVars}-\ell}$ coefficients, in plain --- together with $Q$
+consistency queries, each a coset \eqref{eq:coset} with its Merkle path.
+
+The verifier performs three checks:
+\begin{enumerate}[label=(\arabic*),leftmargin=*]
+  \item \textbf{Round consistency.} Each round message sums to the claim the previous
+        round left.
+  \item \textbf{Reduced claim.} $\langle \mathsf{Reduced},\, \eq(\vec r)\rangle$ equals
+        the residual claim the folding rounds left.
+  \item \textbf{Consistency queries.} For each of the $Q$ sampled indices: the coset
+        opens under \texttt{Commitment.Cosets} (the only root; Remark~\ref{rem:oneroot}),
+        \emph{and} it folds to the reduced
+        polynomial's codeword at that index --- a single $\eq$ dot product,
+        $\langle \mathcal{C}_y, \eq(\vec r)\rangle$.
+\end{enumerate}
+
+Checks (1) and (2) make the proof internally consistent. \textbf{Check (3) is the one
+that makes it binding}: it is the only step that touches the committed oracle, and it
+is what rejects a prover who folded a polynomial other than the one committed. A
+convenient consequence of choosing the coset dimension equal to $\ell$ is that one
+primitive --- an $\eq$ dot product --- serves both (2) and (3).
+
+\paragraph{Query count.}
+The query term dominates the soundness error; the folding rounds' Schwartz--Zippel term
+is $\approx 2^{-252}$ and the $|\dom|/|\F|$ term $\approx 2^{-240}$. Hence
+\begin{equation}
+  Q \;=\; \left\lceil \frac{\lambda}{\log_2(1/\rho)} \right\rceil
+  \;=\; \left\lceil \frac{128}{3} \right\rceil \;=\; 43
+  \qquad (\lambda = 128,\ \rho = 1/8),
+  \label{eq:queries}
+\end{equation}
+under the \emph{capacity} bound \paper{Thm.\,titan-pcs}. Capacity is
+\textbf{conjectured}; the provable bound is Johnson's radius, which charges
+$\tfrac{1}{2}\log_2(1/\rho)$ bits per query and so needs $86$ queries for the same
+$\lambda$. The implementation defaults to capacity, matching the paper's cost analysis
+\paper{\S\,titan-pcs-costs}, and exposes Johnson as a selectable regime.
+
+\paragraph{Number of folding rounds.}
+The proof carries $Q \cdot 2^{\ell}$ group elements of cosets plus
+$2^{\mathsf{RowVars}-\ell}$ coefficients of the reduced polynomial, so the size-optimal
+$\ell$ minimizes $Q\,2^{\ell} + 2^{\mathsf{RowVars}-\ell}$. Because the coset term
+carries the factor $Q$, this optimum lies \emph{below} the paper's
+$\mathsf{RowVars}/2 - 1$: at $\mathsf{RowVars} = 12$ it is $3$, not $5$. The
+implementation computes it rather than fixing it, and leaves $\ell$ settable.
+
+\section{Parameters and admissible sizes}
+
+\begin{center}
+\begin{tabular}{@{}lll@{}}
+\toprule
+parameter & default & meaning \\
+\midrule
+$\lambda$              & $128$          & target soundness in bits \\
+$\mathsf{LogRate}$     & $3$            & $\rho = 1/8$ \\
+regime                 & capacity       & conjectured; Johnson is provable \\
+$Q$                    & $43$           & consistency queries, from \eqref{eq:queries} \\
+$\ell$                 & size-optimal   & folding rounds \\
+$\mathsf{M1}$          & $\lfloor m/2 \rfloor$ & column variables of the matrix \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Two structural constraints bound which $m$ are usable.
+
+\emph{Even row half.} The coset layout halves the row variables exactly, so
+$\mathsf{RowVars} = m - \mathsf{M1}$ must be even. Under the balanced split
+$\mathsf{M1} = \lfloor m/2 \rfloor$ this holds exactly when
+$m \equiv 0$ or $3 \pmod 4$. The restriction belongs to the \emph{balanced split}, not
+to the scheme: choosing $\mathsf{M1}$ freely makes any $m$ admissible --- $m = 10$ at
+$\mathsf{M1} = 4$ has a row half of $6$.
+
+\emph{Drawability.} The $Q$ queries are \emph{distinct} indices into the folded domain,
+so $Q \le 2^{\mathsf{RowVars} - \ell + \mathsf{LogRate}}$. At $Q = 43$ this is what
+rules out the small sizes that pass the parity rule.
+
+\section{Deliberate departures from the paper}
+\label{sec:notdone}
+
+The implementation is a faithful but partial instantiation. What is missing, and why it
+matters:
+
+\begin{description}[leftmargin=*,style=nextline]
+  \item[Not WHIR proper.] The reduced polynomial is sent in plain rather than recursed
+    on, so the verifier is $O(2^{\mathsf{RowVars}-\ell})$ rather than
+    polylogarithmic. Soundness is unaffected --- sending more is not sending less ---
+    but proof size and verifier time are.
+  \item[No $O(n^{1/4})$ layer.] The paper's second folding layer runs over the
+    \emph{generator} oracle \paper{\S\,group-optimizations}. It is absent, which is
+    precisely why $\mathsf{M1}$ defaults to $\lfloor m/2 \rfloor$ here where the
+    reference implementation uses $\lfloor m/2 \rfloor - 2$: without leg-2 folding,
+    every extra column variable is paid in full.
+  \item[No CSP folding.] Related to the above: leg 2 is linear. This is also why the
+    reference's larger query count does not apply here --- it accounts for Johnson's
+    radius \emph{and} the soundness error of folding CSP, neither of which is in play.
+  \item[No zero knowledge.] The proof reveals $Q$ cosets of the oracle and the reduced
+    polynomial in plain. This is a commitment scheme, not a ZK argument.
+  \item[No serialization, no batching, no trusted setup.] Generators are supplied by
+    the caller; proofs are in-memory structures; one evaluation point per proof.
+\end{description}
+
+\section{References}
+
+Section names above refer to the Titan paper (eprint version): \S\,titan-overview,
+\S\,titan-setup, \S\,titan-commit, \S\,titan-eval-proof, \S\,group-sum-check,
+\S\,whir-oracle-algo, \S\,csp-speedup, \S\,partial-eval-csp, \S\,check-C,
+\S\,group-optimizations, \S\,titan-pcs-costs, Thm.\,titan-pcs, Lem.\,csp-soundness,
+Lem.\,eqind.
+
+The interface this construction is exposed through is documented in
+\texttt{docs/crypto/titan-pcs-api.md}; the implementation design record, including the
+known defects that no functional test detects, is in \texttt{docs/crypto/titan.md}.
+
+\end{document}
