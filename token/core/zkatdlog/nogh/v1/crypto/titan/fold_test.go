@@ -634,11 +634,15 @@ func TestEvalGroupRejectsAReducedQueryCount(t *testing.T) {
 // variable per row bit. Getting this wrong is a shape error the validation catches,
 // but it is worth stating because m is the number that is in scope at the call.
 //
-// # Only m divisible by 4 is usable on the field path
+// # Only m divisible by 4, and at least 8, is usable on the field path
 //
 // rowVars = m - m/2, so an even rowVars needs m divisible by 4: m=6 gives rowVars=3
 // and DefaultFoldConfig rejects it. This is the even-m assumption composed with the
-// matrix split, not a limitation of the folding itself, and it is pinned by
+// matrix split, not a limitation of the folding itself.
+//
+// m=4 is excluded for a second, independent reason: rowVars=2 gives a folded domain
+// of 16 cosets, and the default 43 queries cannot be drawn distinctly from it. So the
+// field path's smallest usable size is m=8. Both boundaries are pinned by
 // TestFieldFoldRequiresMDivisibleByFour.
 func newFieldFoldFixture(t *testing.T, m, queries int) (*evalFixture, FoldConfig) {
 	t.Helper()
@@ -678,7 +682,7 @@ func newFieldFoldFixture(t *testing.T, m, queries int) (*evalFixture, FoldConfig
 func TestEvalWithFoldRoundTripAndMatchesDirectEvaluation(t *testing.T) {
 	t.Parallel()
 
-	for _, m := range []int{4, 8, 12} {
+	for _, m := range []int{8, 12} {
 		fx, _ := newFieldFoldFixture(t, m, 4)
 
 		proof, sigma, err := fx.hint.Eval(fx.curve, fx.cg, fx.alpha)
@@ -773,30 +777,69 @@ func TestEvalWithoutCosetsRejectsAFoldProof(t *testing.T) {
 	require.ErrorIs(t, err, ErrNilProof)
 }
 
-// TestFieldFoldRequiresMDivisibleByFour pins the constraint the field path inherits
-// from composing the even-m assumption with the matrix split.
+// TestFieldFoldRequiresMDivisibleByFour pins the two constraints the field path
+// inherits, and keeps them distinguishable -- they are independent, and a change that
+// fixed one would otherwise look like it had fixed both.
 //
-// The folding phase runs on the tier-1 group polynomial, which has rowVars = m-m/2
-// variables, and FoldConfig requires an even count. So m=4,8,12 are foldable and
-// m=2,6,10 are not -- a real restriction on CommitFieldWithFold, recorded here so
-// it is a documented boundary rather than a surprise at the call site.
+// PARITY: the folding phase runs on the tier-1 group polynomial, which has
+// rowVars = m-m/2 variables, and FoldConfig requires an even count. m=6 gives
+// rowVars=3, so m must be divisible by 4.
+//
+// DRAWABILITY: the Q consistency queries are distinct indices into the folded domain,
+// which holds 2^(rowVars-Ell+LogRate) cosets. m=4 gives rowVars=2 and only 16 cosets,
+// which cannot supply the default 43 queries. This is why the field path's smallest
+// usable size is 8 rather than 4, and it is a property of the DEFAULT query count
+// rather than of the construction -- the subtest below shows m=4 working at Q=16.
 func TestFieldFoldRequiresMDivisibleByFour(t *testing.T) {
 	t.Parallel()
 
+	const (
+		ok          = "ok"
+		parity      = "odd row count"
+		drawability = "too few cosets for the default queries"
+	)
+
 	for _, tc := range []struct {
-		m        int
-		foldable bool
+		m      int
+		reason string
 	}{
-		{2, false}, {4, true}, {6, false}, {8, true}, {10, false}, {12, true},
+		{2, parity}, // rowVars=1
+		{4, drawability},
+		{6, parity}, // rowVars=3
+		{8, ok},
+		{10, parity}, // rowVars=5
+		{12, ok},
 	} {
 		rowVars := tc.m - tc.m/2
-		_, err := DefaultFoldConfig(rowVars)
-		if tc.foldable {
+		cfg, err := DefaultFoldConfig(rowVars)
+
+		if tc.reason == ok {
 			require.NoError(t, err, "m=%d (rowVars=%d) should be foldable", tc.m, rowVars)
+			require.GreaterOrEqual(t, cfg.NumCosets(rowVars), cfg.Queries, "m=%d", tc.m)
+
+			continue
+		}
+
+		require.ErrorIs(t, err, ErrInvalidFoldConfig,
+			"m=%d (rowVars=%d) should be rejected: %s", tc.m, rowVars, tc.reason)
+
+		// Naming the reason is the point: both paths return ErrInvalidFoldConfig, so
+		// asserting the sentinel alone would not notice the two swapping over.
+		if tc.reason == parity {
+			require.Contains(t, err.Error(), "even",
+				"m=%d was rejected, but not for the parity reason this table records", tc.m)
 		} else {
-			require.ErrorIs(t, err, ErrInvalidFoldConfig, "m=%d (rowVars=%d) should not be", tc.m, rowVars)
+			require.Contains(t, err.Error(), "distinct queries",
+				"m=%d was rejected, but not for the drawability reason this table records", tc.m)
 		}
 	}
+
+	// m=4 is excluded by the default query count, not by the construction. With a
+	// query count the domain can supply, rowVars=2 configures fine -- which is what
+	// makes the exclusion a parameter choice rather than a shape error.
+	small := FoldConfig{Ell: 1, LogRate: 3, Queries: 16, Regime: Capacity}
+	require.NoError(t, small.Validate(2),
+		"m=4 (rowVars=2) should fold at a query count its 16 cosets can supply")
 }
 
 // TestFoldChecksEveryQueryNotJustTheFirst pins that the verifier checks all Q

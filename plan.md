@@ -3,12 +3,24 @@
 > ## ⏸️ PAUSED — resume here
 >
 > Step 5 is **functionally complete and committed** (`95eb7b4a` folding + coseting,
-> `42b243d1` batching). `Eval`/`EvalGroup` are now sound polynomial commitment openings
-> at ~128 bits under the capacity bound. Suite green, race-clean, `go vet`/`gofmt` clean,
-> coverage 91.0%, 16 mutations each caught by a named test.
+> `42b243d1` batching), and the PCS facade (5.14, `pcs.go`/`pcs_test.go`) is written and
+> green on top of it. `Eval`/`EvalGroup` are sound polynomial commitment openings at ~128
+> bits under the capacity bound, and the scheme is now reachable as an ordinary
+> setup/statement/witness API. Suite green, race-clean, `go vet`/`gofmt` clean, coverage
+> 91.0%. Mutation coverage: 16 over the fold verifiers, 10 over the facade; every survivor
+> is either recorded as an equivalent mutant or closed by a named test.
 >
-> **Branch `sumcheck` is 8 commits ahead of `origin/sumcheck` and has NOT been pushed —
-> no go-ahead was given.**
+> **Branch `sumcheck` is 9 commits ahead of `origin/sumcheck` and has NOT been pushed —
+> no go-ahead was given.** The facade work is committed on top of that as a 10th.
+>
+> Two findings worth re-reading before touching `NewFieldSetup`, both from the facade's
+> mutation sweep (§13.12):
+> - Oversizing the field **domain** is invisible to every functional test — it is a pure
+>   cost (`2^(m/2)`, 256x at m=16), because the surplus points are never read and the
+>   domain size never enters the transcript. Only
+>   `TestPCSSetupSizesTheDomainByTheFoldedHalf` catches it.
+> - Validating the fold config against `numVars` rather than `rowVars` is an **equivalent
+>   mutant**, not a missing test. Do not try to write one.
 >
 > To pick this up, in order:
 >
@@ -400,6 +412,42 @@ committed coset oracle.
 Verification: suite green, race-clean (79.6s), `go vet` clean, `gofmt` clean, coverage
 91.0%, whole-repo `go build ./...` clean.
 
+- [x] 5.14 **`pcs.go` + `pcs_test.go` — the PCS facade.** `NewFieldSetup`/`NewGroupSetup`,
+      `FieldStatement`/`FieldWitness` (and group equivalents), `NewFieldProver`/`Prove()`,
+      `NewFieldVerifier`/`Verify() int` + `VerifyErr() error`. Pure wiring — no new
+      cryptography — but it hides four decisions whose failures are silent: the two paths
+      need **different domain sizes** (`rowVars+LogRate` vs `m+LogRate`), folding must be
+      **on**, `alpha` has `m` coordinates and not `Commitment.NumVars`, and the generators
+      must be converted **once** (`NewGenerators` is 15–18% of a prove and the bulk of a
+      verify). Commitment is built in `NewFieldProver`, per the user's choice, so a prover
+      always owns a commitment matching its witness.
+
+      Two guarantees carry the weight, and they point in **opposite directions**: a prover
+      from this API always commits *with* folding (`TestPCSProverAlwaysFolds`), and a
+      verifier from this API *refuses* a commitment that cannot support folding
+      (`TestPCSVerifierRejectsUnfoldedCommitment`). Both are wiring properties the round
+      trip cannot see — an unfolded proof verifies happily against its own unfolded
+      commitment — so each has a dedicated test whose godoc says what swap it catches.
+
+      Verification: suite green, race-clean, `gofmt`/`go vet` clean, coverage **91.0%**,
+      whole-repo `go build ./...` clean. A diagnostic probe printed the actual rejection
+      reason for every negative, confirming each is rejected for the reason its name
+      claims — the package's recurring wrong-reason-pass trap.
+
+      **Mutation sweep: 10 mutations, 8 caught, 2 survivors — both on the
+      `rowVars`/`numVars` axis, and different in kind.** Validating the fold config
+      against `numVars` is an **equivalent mutant**: `DefaultEll` is `1` everywhere the
+      field path admits, and both `m`-dependent constraints in `Validate` are *looser* at
+      the larger parameter, so no test can distinguish them. Oversizing the **domain** was
+      a **real gap** — and a *performance* defect, not a soundness one, which is why the
+      round trips were blind to it: the surplus points are never read and the domain size
+      is never absorbed into the transcript, so a proof built on a `2^11` domain at m=8 is
+      accepted by a verifier holding the correct `2^7` one, with no error. Closed with
+      `TestPCSSetupSizesTheDomainByTheFoldedHalf`, which asserts `dom.LogSize` on both
+      paths (the group path too, so a unifying "fix" also fails) and was confirmed to kill
+      the mutant. It also corrected a wrong claim in the `pcs.go` header and §13.12: the
+      waste is `2^(m/2)` — 256x at m=16 — not "twice as large".
+
 ### Still owed on step 5
 
 - [ ] `make lint` — `golangci-lint` is absent in this environment, so it has **not**
@@ -411,7 +459,9 @@ Verification: suite green, race-clean (79.6s), `go vet` clean, `gofmt` clean, co
 - [ ] Benchmark the `EncodeGroupOracleAt`-vs-`EncodeGroupOracle` crossover. The godoc
       claims the butterfly wins when most of the codeword is wanted; that is reasoning,
       not measurement, and is flagged as such.
-- [ ] Commit the batching work (5.13) — code, tests, §13.6/§13.7/§13.12 doc updates.
+- [ ] Commit the batching work (5.13) and the facade (5.14) — code, tests, and the
+      §13.6/§13.7/§13.10 doc updates plus the new §13.12 ("The PCS facade"); what was
+      §13.12 is now §13.13.
 
 ## Notes & Decisions — step 5
 

@@ -178,6 +178,13 @@ func DefaultFoldConfig(m int) (FoldConfig, error) {
 // layout assumes an exact split. Ell must be in [1, m/2] — at least one round to
 // fold, and at most m/2 because Queries cosets of 2^Ell points are opened, so a
 // larger Ell would make the queries cost more than the polynomial it is proving.
+//
+// Queries must also be drawable: the consistency queries are DISTINCT indices into
+// the folded domain, so Queries cannot exceed NumCosets(m). This binds only at the
+// very smallest sizes -- the default 43 queries need 2^(m-Ell+LogRate) >= 43, which
+// m = 2 fails and every larger even m satisfies -- but it is checked here rather
+// than left to sampleQueryIndices, which would report it from deep inside proveFold
+// as a transcript failure long after the configuration could be changed.
 func (c FoldConfig) Validate(m int) error {
 	if m <= 0 || m%2 != 0 {
 		return errors.Wrapf(ErrInvalidFoldConfig, "number of variables must be positive and even, got %d", m)
@@ -190,6 +197,11 @@ func (c FoldConfig) Validate(m int) error {
 	}
 	if c.Queries <= 0 {
 		return errors.Wrapf(ErrInvalidFoldConfig, "query count must be positive, got %d", c.Queries)
+	}
+	if n := c.NumCosets(m); c.Queries > n {
+		return errors.Wrapf(ErrInvalidFoldConfig,
+			"%d distinct queries cannot be drawn from the %d cosets of a %d-variable "+
+				"polynomial at ell=%d, rate 2^-%d", c.Queries, n, m, c.Ell, c.LogRate)
 	}
 	if c.Regime != Capacity && c.Regime != Johnson {
 		return errors.Wrapf(ErrInvalidFoldConfig, "unknown soundness regime %d", int(c.Regime))

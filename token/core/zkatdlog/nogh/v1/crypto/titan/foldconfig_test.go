@@ -108,10 +108,18 @@ func TestDefaultEllIsSizeOptimal(t *testing.T) {
 	require.Less(t, DefaultEll(16, q), 16/2-1)
 }
 
+// TestDefaultFoldConfig checks the recommended configuration at every size it is
+// defined for.
+//
+// m starts at 4, not 2. At m=2 the folded domain holds 2^(2-1+3) = 16 cosets and the
+// default 43 queries cannot be drawn distinctly from it, so DefaultFoldConfig
+// reports an error rather than returning a configuration that fails at prove time;
+// TestDefaultFoldConfigHasAFloor pins that boundary. m=2 is the only even count
+// affected -- m=4 already has 64 cosets.
 func TestDefaultFoldConfig(t *testing.T) {
 	t.Parallel()
 
-	for m := 2; m <= 20; m += 2 {
+	for m := 4; m <= 20; m += 2 {
 		cfg, err := DefaultFoldConfig(m)
 		require.NoError(t, err)
 		require.NoError(t, cfg.Validate(m))
@@ -120,6 +128,33 @@ func TestDefaultFoldConfig(t *testing.T) {
 		require.Equal(t, Capacity, cfg.Regime)
 		require.GreaterOrEqual(t, cfg.SecurityBits(), DefaultSecurityBits)
 	}
+}
+
+// TestDefaultFoldConfigHasAFloor pins the smallest polynomial the recommended
+// configuration is defined for, and that the failure is reported at configuration
+// time rather than deep inside proveFold.
+//
+// The constraint is that the Q consistency queries are DISTINCT indices into the
+// folded domain, so Q <= 2^(m-Ell+LogRate). Nothing else in the package notices: the
+// commit step builds the oracle happily, and it is sampleQueryIndices -- called after
+// the folding rounds have already been absorbed -- that would otherwise fail.
+func TestDefaultFoldConfigHasAFloor(t *testing.T) {
+	t.Parallel()
+
+	_, err := DefaultFoldConfig(2)
+	require.ErrorIs(t, err, ErrInvalidFoldConfig,
+		"m=2 has only 16 cosets and cannot supply 43 distinct queries")
+
+	_, err = DefaultFoldConfig(4)
+	require.NoError(t, err, "m=4 has 64 cosets, which is enough")
+
+	// The check is on drawability, not on m: a smaller query count is fine at m=2.
+	small := FoldConfig{Ell: 1, LogRate: 3, Queries: 16, Regime: Capacity}
+	require.NoError(t, small.Validate(2))
+
+	small.Queries = 17
+	require.ErrorIs(t, small.Validate(2), ErrInvalidFoldConfig,
+		"17 distinct queries cannot come from 16 cosets")
 }
 
 func TestFoldConfigValidate(t *testing.T) {

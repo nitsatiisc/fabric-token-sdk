@@ -660,10 +660,11 @@ so the Go verifier must be written from the paper rather than ported.
 | `eval_bench_test.go` | `Eval` and `VerifyEval` at `m ∈ {8,10,12,14}`; `EvalGroup` at `m ∈ {8,10,12}`; the mathlib boundary for generators and scalars at `n ∈ {16,64,128,256}`; cached vs uncached across prove/verify |
 | `domain_test.go` | `g_(d-1) = g_d^2` and `L_d.Elements[i]^2 = L_(d-1).Elements[i mod 2^(d-1)]` for `d ∈ 2..18` — the unstated gnark-crypto dependency all cross-round index arithmetic rests on; `Squared()` against a freshly built domain |
 | `coset_test.go` | the coset **definition** against an independent `EvaluatePoint` (6 configs); `⟨leaf, eq(r)⟩` equals the reduced codeword; two negatives pinning that the coset oracle is **not** a regrouping or a strided read of the flat codeword; `CommitCosets` round-trip and binding; validation |
-| `foldconfig_test.go` | `Q(λ=128, ρ=1/8) = 43` under capacity and 86 under Johnson; the `DefaultEll` size model; `Validate` over `ell ∈ [1, m/2]`, odd `m`, bad rate and bad query count |
+| `foldconfig_test.go` | `Q(λ=128, ρ=1/8) = 43` under capacity and 86 under Johnson; the `DefaultEll` size model; `Validate` over `ell ∈ [1, m/2]`, odd `m`, bad rate and bad query count; the **drawability floor** — `Queries ≤ NumCosets(m)`, so `DefaultFoldConfig(2)` is rejected and `m = 4` is the smallest default-configurable size (13.10) |
 | `queries_test.go` | determinism; dependence on the transcript; distinctness and range including `n=256, q=43`; domain coverage; exhaustion at `q = n`; validation (nil transcript, non-power-of-two `n`, `q > n`) |
-| `fold_test.go` | round-trip for `m ∈ {4,6,8,10}` × `ell ∈ 1..m/2`; the reduced polynomial against `foldFirstField` applied `ell` times; **a lying prover** whose fold runs over another polynomial; **a foreign fold with genuine openings** (the test that check 3 is load-bearing, with `verifyFoldRoundsOnly` asserting checks 1–2 pass); every query position corrupted in turn, including the last; 11 soundness negatives (tampered leaf/path, wrong index, swapped and permuted queries, tampered/replaced/truncated reduced poly, tampered and dropped round, dropped query); wrong claim; wrong `alpha`; short coset; end-to-end `Eval`/`EvalGroup` with folding at `m ∈ {4,8,12}` incl. anti-downgrade in both directions and the prover-chosen query count; `m ≡ 0 mod 4` on the field path; the batched check 3 (per-query failures, per-query sensitivity of the combined equation, and the absorb-before-sample ordering that makes the combination sound without relying on `gamma` — see 13.7); validation |
+| `fold_test.go` | round-trip for `m ∈ {4,6,8,10}` × `ell ∈ 1..m/2`; the reduced polynomial against `foldFirstField` applied `ell` times; **a lying prover** whose fold runs over another polynomial; **a foreign fold with genuine openings** (the test that check 3 is load-bearing, with `verifyFoldRoundsOnly` asserting checks 1–2 pass); every query position corrupted in turn, including the last; 11 soundness negatives (tampered leaf/path, wrong index, swapped and permuted queries, tampered/replaced/truncated reduced poly, tampered and dropped round, dropped query); wrong claim; wrong `alpha`; short coset; end-to-end `Eval`/`EvalGroup` with folding at `m ∈ {8,12}` incl. anti-downgrade in both directions and the prover-chosen query count; the field path's two size constraints (`m ≡ 0 mod 4` **and** `m ≥ 8`), asserting on the *reason* for each rejection since both return `ErrInvalidFoldConfig`; the batched check 3 (per-query failures, per-query sensitivity of the combined equation, and the absorb-before-sample ordering that makes the combination sound without relying on `gamma` — see 13.7); validation |
 | `fold_bench_test.go` | proof size in **real serialized bytes** vs `ell ∈ 1..6` at `m = 12`; prove and verify at `m ∈ {8,10,12}`, the measurement behind the 10× batching speedup in 13.6 |
+| `pcs_test.go` | the facade (13.12): round trip at `m ∈ {8,12,16}` (field) and `{4,6,8,10}` (group); the **two guarantees** — a prover always folds, a verifier refuses an unfolded commitment; wrong value, wrong point, and a foreign proof rejected on both paths; `Verify` vs `VerifyErr` separating misuse from rejection; arity errors incl. `Alpha` sized from the row half; the field path's size constraints at the API boundary; setup validation and nil receivers; the **domain-sizing rule** on both paths, which no functional test can see |
 
 Statement coverage is **91.0%** overall, race-clean. (It moved from 92.6% because the
 folding phase added more error paths than the negatives exercise; the soundness-critical
@@ -1296,7 +1297,7 @@ verifier is now roughly 75× faster than its own prover rather than 15× slower.
 
 Batching does **not** remove the `Q·2^(m−ℓ)` plaintext term from the proof itself —
 `Reduced` is still sent in full. Recursing instead of sending it in plain is WHIR proper,
-and is what would take the verifier to polylog; see 13.12.
+and is what would take the verifier to polylog; see 13.13.
 
 ### 13.7 Mutation testing the folding phase
 
@@ -1411,15 +1412,34 @@ The same reasoning drives the **anti-downgrade check in both directions**: if
 unsound behaviour from a commitment that promised better; without the second, a fold
 proof appears to add assurance against a root that never committed to cosets.
 
-### 13.10 The field path needs `m ≡ 0 mod 4`
+### 13.10 The field path needs `m ≡ 0 mod 4`, and `m ≥ 8`
 
-Folding attaches to leg 1, which runs over the row variables — so the constraint "`m`
-even" from the folding spec applies to `rowVars = m − m/2`, not to `m`. That makes the
-usable field-path sizes m = 4, 8, 12, … and **excludes m = 6, 10**, where `rowVars` is
-odd. This surfaced as a `DefaultFoldConfig` rejection at m = 6 that looked like a test
-bug and is not; `TestFieldFoldRequiresMDivisibleByFour` pins it, and
-`newFieldFoldFixture`'s godoc explains it at the point of use. The group path, having
-no matrix split, needs only `m` even.
+Two independent constraints, which is why they are worth separating.
+
+**Parity.** Folding attaches to leg 1, which runs over the row variables — so the
+constraint "`m` even" from the folding spec applies to `rowVars = m − m/2`, not to `m`.
+That **excludes m = 6, 10**, where `rowVars` is odd. This surfaced as a
+`DefaultFoldConfig` rejection at m = 6 that looked like a test bug and is not.
+
+**Drawability.** The `Q` consistency queries are *distinct* indices into the folded
+domain, which holds `2^(rowVars − ℓ + logRate)` cosets. At m = 4, `rowVars = 2` gives 16
+cosets, and the default `Q = 43` cannot be drawn from them. So the smallest usable
+field-path size is **m = 8**, not m = 4.
+
+The second constraint was found by the PCS facade (section 13.12) and is a real defect
+it exposed, not a limitation of the facade: `DefaultFoldConfig(2)` was returning
+`Queries = 43` happily, and the failure surfaced from inside `proveFold` as
+"cannot draw 43 distinct indices from 16" — *after* the commitment had been built and the
+folding rounds absorbed into the transcript. `FoldConfig.Validate` now checks
+`Queries ≤ NumCosets(m)`, so the configuration is rejected where it is chosen rather than
+where it is used. m = 2 is the only even count affected on the group path, since that path
+sizes its domain by `m` itself and already has 64 cosets at m = 4.
+
+Both boundaries are pinned by `TestFieldFoldRequiresMDivisibleByFour`, which asserts on
+the *reason* for each rejection rather than only on the sentinel — both return
+`ErrInvalidFoldConfig`, so a test checking the sentinel alone would not notice the two
+swapping over. `TestDefaultFoldConfigHasAFloor` pins the m = 2 boundary and that the
+check is on drawability rather than on `m`: at `Q = 16`, `rowVars = 2` configures fine.
 
 ### 13.11 API
 
@@ -1459,7 +1479,99 @@ no matrix split, needs only `m` even.
 `CommitGroup`/`CommitField` still produce a commitment whose `Cosets` is nil, which
 reduces the claim without closing it and now says so in its godoc.
 
-### 13.12 What is still open
+### 13.12 The PCS facade
+
+`pcs.go` exposes the scheme in the shape an argument system wants it: setup, statement,
+witness, prover, verifier. It adds **no cryptography** — every line delegates to the
+primitives above — and exists because assembling them correctly takes four decisions
+whose failures are silent.
+
+    type FieldSetup struct { /* numVars, fold, gens, dom, curve */ }
+    func NewFieldSetup(numVars int, gens []bls12381.G1Affine, curve *mathlib.Curve, cfg FoldConfig) (*FieldSetup, error)
+    func (s *FieldSetup) NumVars() int
+    func (s *FieldSetup) FoldConfig() FoldConfig
+
+    type FieldStatement struct { Alpha []fr.Element }
+    type FieldWitness   struct { Poly sumcheck.FieldPoly }
+
+    func NewFieldProver(setup *FieldSetup, st FieldStatement, w FieldWitness) (*FieldProver, error)
+    func (p *FieldProver) Commitment() *Commitment
+    func (p *FieldProver) Prove() (*EvalProof, fr.Element, error)
+
+    func NewFieldVerifier(setup *FieldSetup, st FieldStatement, com *Commitment) (*FieldVerifier, error)
+    func (v *FieldVerifier) Verify(proof *EvalProof, sigma fr.Element) int
+    func (v *FieldVerifier) VerifyErr(proof *EvalProof, sigma fr.Element) error
+
+The group path is the same with `GroupSetup`/`GroupStatement`/`GroupWitness`,
+`NewGroupSetup(numVars, curve, cfg)` (no generators — the group commitment is tier 2
+alone), and `Prove() (*GroupEvalProof, bls12381.G1Affine, error)`.
+
+**The four decisions it hides.**
+
+1. **The two paths need different domain sizes.** The group path encodes all `m`
+   variables and needs `2^(m + logRate)`; the field path folds only leg 1 and needs
+   `2^(rowVars + logRate)`. Passing `m` on the field path oversizes the domain by
+   `2^(m - rowVars) = 2^(m/2)` — 16x at `m = 8`, **256x** at `m = 16` — and all of it is
+   paid in the commit FFT that dominates `NewFieldProver`. Not "twice", which is the
+   natural guess from the usual halving and was what this section originally claimed.
+2. **Folding must be switched on.** Only the `WithFold` constructors are reachable from
+   the facade, so a caller cannot obtain an unsound prover from it at all.
+3. **`Alpha` has `m` coordinates, not `Commitment.NumVars`,** which counts only the row
+   half of the field matrix.
+4. **Generators are converted once.** `NewGenerators` caches a mathlib conversion worth
+   15–18% of a prove and the bulk of a verify; building it per call is a silent ~6× on
+   the verifier.
+
+**Two guarantees, in opposite directions.** A prover from this API always commits *with*
+folding, and a verifier from this API *refuses* a commitment whose `Cosets` is nil. The
+second is the one the `0/1` return cannot express, so it is caught at construction:
+accepting such a commitment would make `Verify` report 1 for a proof that establishes
+nothing. `TestPCSProverAlwaysFolds` and `TestPCSVerifierRejectsUnfoldedCommitment` pin
+them; the round-trip tests alone cannot, because an unfolded proof verifies happily
+against its own unfolded commitment.
+
+**`Verify` returns `int`, `VerifyErr` returns `error`.** `Verify`'s `0` deliberately
+collapses "the proof is invalid" and "you called it wrong", which is right for a caller
+that wants only the digit and wrong for one debugging an integration.
+`TestPCSVerifyErrSeparatesMisuseFromRejection` pins that a nil proof reports `ErrNilProof`
+while a forged one reports a coset failure.
+
+**What `Verify` does not establish.** It does not establish that the commitment is to any
+particular polynomial — that is what a commitment is *for*, and a verifier that never saw
+the witness cannot check it. A caller must obtain the commitment from a source it trusts
+or bind it into a larger transcript. Passing the prover's own `Commitment()` straight into
+the verifier, as the tests do, exercises the protocol and proves nothing about provenance.
+
+The scheme is **not** zero-knowledge: `Reduced` is sent in plain, so a proof reveals
+partial information about the witness. Deferred by design, as below.
+
+**Mutation testing the facade.** Ten mutations over `pcs.go` and `foldconfig.go`; eight
+were caught, and the two survivors were both on the `rowVars`/`numVars` axis in
+`NewFieldSetup` — the same confusion decision 1 above exists to prevent. They turned out
+to be different in kind, which is the useful part.
+
+*Validating the fold config against `numVars` instead of `rowVars` is an equivalent
+mutant.* `DefaultEll` returns `1` at every size the field path admits, and `Validate`'s
+two `m`-dependent constraints — `Ell <= m/2` and `Queries <= NumCosets(m)` — are both
+*looser* at the larger parameter. So `Validate(numVars)` accepts everything
+`Validate(rowVars)` does, and differs only for a hand-supplied `Ell` in
+`(rowVars/2, numVars/2]`. Recorded here so it is not later "fixed" with a test that
+cannot exist; the shipped code still validates against `rowVars`, because that is what
+the fold phase runs over and it makes the error name the right parameter.
+
+*Oversizing the domain was a real gap, and it is a **performance** defect, not a
+soundness one.* This is why no correctness test saw it: an oversized domain still
+encodes, commits, proves and verifies, because `EncodeFieldOracle` consumes the first
+`2^(rowVars+logRate)` points and ignores the rest, and the domain size is never absorbed
+into the transcript. Probed directly — a prover on a `2^11` domain at `m = 8` produces a
+proof that a verifier holding the correct `2^7` domain accepts, with no error at all. A
+cost that every functional test is blind to needs a structural assertion, so
+`TestPCSSetupSizesTheDomainByTheFoldedHalf` asserts `dom.LogSize` against
+`rowVars + LogRate` on the field path and against `m + LogRate` on the group path, the
+latter so a "fix" that unifies the two paths fails too. A benchmark would have measured
+the regression but only a human reading the numbers would have noticed it.
+
+### 13.13 What is still open
 
 Deferred by design, unchanged from section 12.8: zero-knowledge; `Setup`; batched `Eval`
 at several points; serialization; and the `O(n^(1/4))` variant, which needs a second
