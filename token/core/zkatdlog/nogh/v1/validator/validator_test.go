@@ -8,6 +8,7 @@ package validator_test
 
 import (
 	"context"
+	"runtime"
 	"testing"
 
 	math "github.com/IBM/mathlib"
@@ -185,4 +186,60 @@ func testVerifyNoErrorOnAction(t *testing.T, actionType actionType, identityType
 	actions, _, err := env.Engine.VerifyTokenRequestFromRaw(t.Context(), nil, "1", raw)
 	require.NoError(t, err)
 	require.Len(t, actions, 1)
+}
+
+// BenchmarkValidatorTransferCSP64 benchmarks the validator's full transfer-payload
+// verification for a single pinned configuration: idemixnym owner identities, the
+// CSP range-proof system, and a 64-bit value range.
+//
+// It differs from BenchmarkValidatorTransfer in two ways:
+//   - The configuration is fixed rather than flag-driven. Cases are built via
+//     GenerateCases instead of GenerateCasesWithDefaults so that the -bits,
+//     -curves, -num_inputs and -num_outputs flags cannot change what is measured;
+//     a run of this benchmark is comparable across invocations.
+//   - The range-proof system is selected explicitly via SetupParams.ProofType.
+//     BenchmarkValidatorTransfer uses NewSetupConfigurations, which does not take
+//     a proof type and therefore generates parameters for the default system.
+//
+// As in BenchmarkValidatorTransfer, the nil second argument to
+// VerifyTokenRequestFromRaw is the ledger accessor (driver.GetStateFnc), so this
+// measures payload verification only -- the type-and-sum proof, the CSP range
+// proofs, and the idemixnym owner signatures -- with no ledger-side checks such
+// as unspent-token lookups.
+func BenchmarkValidatorTransferCSP64(b *testing.B) {
+	pp, err := profile.New(profile.WithAll(), profile.WithPath("./profile"))
+	require.NoError(b, err)
+	require.NoError(b, pp.Start())
+	defer pp.Stop()
+
+	const bits = uint64(64)
+	curves := []math.CurveID{math.BLS12_381_BBS_GURVY}
+	cases := benchmark2.GenerateCases(
+		[]uint64{bits},
+		curves,
+		[]int{2},
+		[]int{2},
+		[]int{runtime.NumCPU()},
+	)
+
+	configurations, err := benchmark.NewSetupConfigurationsWithParams(benchmark.SetupParams{
+		IdemixTestdataPath: "./../testdata",
+		Bits:               []uint64{bits},
+		CurveIDs:           curves,
+		OwnerIdentityType:  idemixnym.IdentityType,
+		ProofType:          rp.CSPRangeProofType,
+	})
+	require.NoError(b, err)
+
+	test := benchmark2.NewTest[*testing2.Env](cases)
+	test.GoBenchmark(b,
+		func(c *benchmark2.Case) (*testing2.Env, error) {
+			return testing2.NewEnv(c, configurations)
+		},
+		func(ctx context.Context, env *testing2.Env) error {
+			_, _, err := env.Engine.VerifyTokenRequestFromRaw(ctx, nil, "1", env.TRWithTransferRaw)
+
+			return err
+		},
+	)
 }

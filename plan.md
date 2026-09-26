@@ -771,3 +771,148 @@ that claimed "foldable iff `m % 4 == 0`" failed at m=3 and is what caught this.
   (from 91.0% — the new error paths in `Split.Validate` and `commitFieldAt` add
   branches the negatives do not all exercise). `make lint` still cannot run here
   (`golangci-lint` absent) and must not be claimed as passing.
+
+---
+
+# Step 7 — Document the PCS interface and the crypto as implemented
+
+## Goal
+
+The PCS is functional end to end. Two documents were missing, and both were asked for:
+a reference for the **public interface** (what a caller touches, in what order) and a
+concise **mathematical description of the construction as implemented** — as opposed to
+as specified in the paper, which is not the same thing.
+
+`docs/crypto/titan.md` already existed but is a 1400-line design record: it explains
+why the code is shaped the way it is, what the mutation passes found, and which defects
+no functional test can see. It is the wrong document to hand someone who just wants to
+call the package, and the wrong one to hand someone who wants the mathematics.
+
+## Implementation Progress
+
+- [x] **Done** — 7.1 `docs/crypto/titan-pcs-api.md`, the interface reference.
+      Covers: the field/group parallel structure and why the field scheme is built on
+      the group one; `NewFieldSetup` vs `NewFieldSetupWithSplit`; statement/witness
+      shapes and the `Alpha` length trap (`setup.NumVars()`, **not**
+      `Commitment.NumVars`); why `NewFieldProver` commits so `Commitment()` is
+      available before `Prove()`; `Verify` (int) vs `VerifyErr` (sentinel) and when to
+      use which; the `Commitment` fields with `NumVars != m` and `ColVars == 0` meaning
+      "not stated" called out explicitly; the `Split` cost trade-off table; the
+      `Validate`/`ValidateForFold` two-contract distinction *with the incident that
+      caused it*; the three independent size constraints; `FoldConfig`, the `Capacity`
+      ⇒ conjectured / `Johnson` ⇒ provable distinction, and why `DefaultEll` sits below
+      the paper's `m/2 − 1`; the sentinel error table with `ErrCosetOpeningInvalid`
+      flagged as the one that catches a lying prover; and a closing section on what the
+      interface deliberately does not offer.
+
+- [x] **Done** — 7.2 `docs/crypto/titan-crypto.tex`, the construction in mathematics.
+      Self-contained (standard classes, no dependency on the paper's private macros,
+      since the repo has no LaTeX infrastructure and this must build anywhere).
+      Four pages. Covers the two-tier commitment (Pedersen rows → group multilinear
+      `G` → power-curve codeword → coset oracle), why there are **two** Merkle roots,
+      the two evaluation legs, the ℓ folding rounds with `Reduced` sent in plain, the
+      three verifier checks with **check 3 identified as the binding one**, and
+      `Q = ⌈λ/log₂(1/ρ)⌉ = 43`. Cites the paper's real section labels.
+
+- [x] **Done** — 7.3 Cross-linking. Both files linked from `docs/README.md` under
+      Cryptographic Primitives. `docs/crypto/titan.md` gained a "Companion documents"
+      header block positioning the three documents against each other, and its
+      **stale `Status` line was corrected** — it still claimed "step 1 (oracle
+      encoding) complete" five steps later.
+
+- [x] **Done** — 7.4 Verified rather than asserted. Details under Notes.
+
+## Notes & Decisions — step 7
+
+- **The `m_1` notation collision is real and is flagged in the `.tex`.** The paper's
+  `m_1 := |\calK_1|` (§titan-commit) is a **Merkle leaf count**; our `Split.M1` is the
+  number of **column** variables, which the paper calls `ℓ_q`. Anyone reading the two
+  side by side will otherwise conflate them. The paper's leaf count is our
+  `Commitment.NumLeaves`.
+- **Every numeric claim in both documents was checked against the code**, not
+  reproduced from memory: `Q=43`, Johnson's 86, `DefaultEll(12)=3`, 42 queries giving
+  <128 bits, `DefaultSecurityBits=128`, `DefaultLogRate=3`, the `m mod 4 ∈ {0,3}`
+  parity table over m=1..24, `NumCosets`/`CosetSize` formulas, and the two worked
+  splits (`m=10, M1=4` → rowVars 6; `m=18, M1=8`). Done with a throwaway test, run
+  green, then deleted — it duplicated coverage that `foldconfig_test.go` and
+  `split_test.go` already own, so committing it would have been redundant.
+- **The worked example in the markdown was compiled and run**, not written by eye. It
+  passes end to end and its `require` lines confirmed the documented
+  `com.ColVars == m/2` and `com.NumVars == m - m/2` semantics. Also deleted after
+  running, for the same reason.
+- **The `.tex` compiles**: `pdflatex` clean, 4 pages, no warnings and no undefined
+  references. A LaTeX file that has never been built is not a document.
+- **Documents were kept separate rather than merged into `titan.md`.** Three audiences
+  — caller, cryptographer, maintainer — with genuinely different needs. Merging would
+  have produced one file nobody reads to the end.
+- `make lint` still cannot run here (`golangci-lint` absent) and must not be claimed as
+  passing. These changes are docs-only plus no code, so `gofmt`/`go vet`/suite state is
+  unchanged from step 6.
+
+---
+
+# Step 8 — Remove the uncommitted flat-codeword root
+
+## Goal
+
+Raised by the user while reviewing the new interface doc: *"Do we ever need
+`Commitment.Root`, shouldn't we always use `Commitment.Coset`?"*
+
+Investigation confirmed the stronger form of that suspicion. `verifyFold` takes a
+`*CosetCommitment`, so its `c.Root` is `Cosets.Root`, and both `eval.go` call sites
+pass `c.Cosets`. Across the whole non-test package `Commitment.Root` was **set once
+(`commit.go:175`) and read never**; the only readers were tests asserting the field
+against itself.
+
+## Implementation Progress
+
+- [x] **Done** — 8.1 `commit.go`: `commitGroup` no longer calls `BuildTree`.
+      `Commitment.Root` is left nil with a godoc marking it **reserved for possible
+      future use** and recording why nil beats both "populated" and "deleted".
+- [x] **Done** — 8.2 Removed `GroupOpeningHint.Tree` and the exported
+      `(*GroupOpeningHint).OpenLeaf` — the prover-side counterpart to the same unread
+      root. `BuildTree`/`Tree` remain, used by the coset oracle in `coset.go`.
+- [x] **Done** — 8.3 Corrected three now-false godocs: `commitGroup`'s summary said
+      "Merkle-commits them"; its body claimed the stage produces a bindable-after-fold
+      commitment; and `CommitGroupWithFold`'s "the two roots are kept separate"
+      paragraph described a design that no longer exists.
+- [x] **Done** — 8.4 Tests. Deleted `TestOpenLeafValidation` and the per-leaf
+      open-against-root loop; replaced the root-length assertion with
+      `assert.Nil(c.Root, ...)`. Re-pointed the three proxy tests (determinism,
+      distinct polys, distinct generators) at `hint.G` and renamed the two whose names
+      said "Roots".
+- [x] **Done** — 8.5 Docs: new §7.6 in `titan.md`, a `remark` in `titan-crypto.tex`
+      (§2, cross-referenced from the check-3 list), the `Commitment` section of
+      `titan-pcs-api.md`, §7.2's tier-2 note, §8's "no unfolded variant" paragraph, and
+      the `commit_test.go` row of the test table.
+
+## Notes & Decisions — step 8
+
+- **The performance saving is small and I am not going to dress it up.** Measured at
+  `m = 12` with a throwaway benchmark, before vs after: 134.2ms → 133.2ms (~0.7%),
+  4,317,677 → 4,252,486 B/op, 46,776 → 45,727 allocs/op. The flat tree is 512 leaves
+  where the commit is dominated by 64 row MSMs and the FFT. **The reason to remove it
+  is the footgun, not the microseconds.**
+- **The footgun is the real finding.** An exported `[]byte` named `Root` that no
+  verifier reads invites a future batching or serialization layer to
+  `VerifyMerkleProof` against it — a check that passes while binding nothing. Same
+  shape as the `chunkIntoCosets` comment that was wrong in the way it warned about.
+- **Nil, not deleted — the user's call, and it is the right one.** Deleting frees the
+  name for a future field with different semantics, which is the worse failure mode for
+  anything that deserialized an old commitment. Nil keeps the name claimed and makes
+  misuse fail at once.
+- **The three proxy tests were re-pointed, not deleted.** Determinism and
+  collision-sensitivity are real properties; only the *instrument* was wrong.
+  Asserting on `hint.G` is strictly stronger than on a digest.
+- **Verified rather than assumed:** a throwaway test drove both the field and group
+  facades end to end and confirmed `Root == nil` while `Cosets.Root != nil` and both
+  `VerifyErr`s pass — so the removal is real and not merely untested. Deleted after
+  running. Suite green, `-race` clean (88.2s), `gofmt`/`go vet` clean, whole-repo
+  `go build ./...` clean, coverage **90.8%** (unchanged). `.tex` rebuilds clean, 5
+  pages, no undefined references.
+- **Not checked against the deferred features, by the user's judgement** (*"I don't
+  think any extension will use it"*). If WHIR-proper recursion or the `O(n^¼)`
+  generator-oracle layer ever needs the flat codeword committed, the field name is
+  still reserved and `commitGroup` is a two-line change.
+- `make lint` still cannot run here (`golangci-lint` absent) and must not be claimed as
+  passing.

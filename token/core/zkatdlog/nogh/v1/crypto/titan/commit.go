@@ -48,7 +48,19 @@ import (
 // so the shape travels with it and a verifier must check it against what it
 // expects.
 type Commitment struct {
-	// Root is the Merkle root of the codeword of the group multilinear.
+	// Root is RESERVED FOR POSSIBLE FUTURE USE and is always nil.
+	//
+	// It once held the Merkle root over the flat codeword of the group multilinear.
+	// Nothing ever verified against it: the folding phase -- the only stage that
+	// opens the oracle -- queries the coset-wise oracle under Cosets.Root, and the
+	// flat codeword is a computational stepping stone to that, not a commitment
+	// anyone opens. So the tree was built, hashed and published for no verifier.
+	//
+	// It is nil rather than removed to keep the field name reserved. Retaining it as
+	// a *populated* field would be worse than either: an exported []byte called Root
+	// invites a future batching or serialization layer to VerifyMerkleProof against
+	// it, which would pass while binding nothing the protocol relies on. Nil makes
+	// that misuse fail immediately instead of silently.
 	Root []byte
 	// NumVars is the number of variables of the committed group multilinear G.
 	// For a field commitment this is log2 of the matrix row count, not the
@@ -99,9 +111,10 @@ type GroupOpeningHint struct {
 	// Codeword is the Reed-Solomon encoding of G over the domain.
 	Codeword []bls12381.G1Affine
 	// Leaves is the codeword grouped into cosets, one per Merkle leaf.
+	//
+	// There is no tree over them; see Commitment.Root. The coset oracle the folding
+	// phase actually opens keeps its own tree, in Cosets.
 	Leaves [][]bls12381.G1Affine
-	// Tree retains every level, so any number of openings are slice reads.
-	Tree *Tree
 
 	// Cosets is the prover state for the coset-wise oracle, or nil if the
 	// polynomial was committed without one. See Commitment.Cosets.
@@ -128,15 +141,15 @@ type FieldOpeningHint struct {
 	Split Split
 }
 
-// commitGroup encodes a group multilinear over the domain, groups the codeword into
-// cosets of 2^k points, and Merkle-commits them.
+// commitGroup encodes a group multilinear over the domain and groups the codeword
+// into cosets of 2^k points.
 //
-// This is an internal STAGE, not a usable commitment on its own: it commits the flat
-// codeword, which is enough to *reduce* an evaluation claim but not to close it.
-// CommitGroupWithFold calls it and adds the coset oracle the consistency queries
-// need. It is unexported for that reason -- a commitment produced here has a nil
-// Cosets, and its openings do not bind (see CommitGroupWithFold, and section 13.3
-// of docs/crypto/titan.md for which check closes the gap).
+// This is an internal STAGE and commits NOTHING on its own. It encodes G, groups the
+// codeword into cosets and fills in the shape fields, but it builds no Merkle tree:
+// the flat codeword's root was never verified against, so it is not computed (see
+// Commitment.Root). CommitGroupWithFold calls this and then adds the coset oracle,
+// which is the only committed object. A Commitment from here has a nil Cosets AND a
+// nil Root, so it binds nothing -- that is why it is unexported.
 //
 // k = 0 gives one codeword point per leaf, which is what every caller passes.
 //
@@ -161,24 +174,22 @@ func commitGroup(G sumcheck.GroupPoly, dom *Domain, k int) (*Commitment, *GroupO
 		return nil, nil, err
 	}
 
-	tree, err := BuildTree(leaves)
-	if err != nil {
-		return nil, nil, errors.Wrap(err, "failed to build the merkle tree over the codeword")
-	}
-
 	numVars, err := numVarsOf(len(G))
 	if err != nil {
 		return nil, nil, err
 	}
 
+	// No Merkle tree over the flat codeword. Building one cost a full hash pass over
+	// 2^LogDomain points to produce a root no verifier reads; see Commitment.Root.
+	// Leaves are still retained: chunkIntoCosets is what pins that cosets regroup the
+	// codeword without reordering it, and the fold's oracle is built separately.
 	c := &Commitment{
-		Root:      tree.Root(),
 		NumVars:   numVars,
 		LogDomain: dom.LogSize,
 		K:         k,
 		NumLeaves: len(leaves),
 	}
-	hint := &GroupOpeningHint{G: G, Codeword: codeword, Leaves: leaves, Tree: tree}
+	hint := &GroupOpeningHint{G: G, Codeword: codeword, Leaves: leaves}
 
 	return c, hint, nil
 }
@@ -197,10 +208,9 @@ func commitGroup(G sumcheck.GroupPoly, dom *Domain, k int) (*Commitment, *GroupO
 // the same polynomial committed at a different Ell is a different commitment. Pass
 // DefaultFoldConfig(m) unless there is a reason not to.
 //
-// The two roots are kept separate rather than combined into one tree. Combining
-// them would save a hash but would let a verifier that confused the two accept
-// openings of the wrong oracle, and the failure would look like a soundness bug
-// rather than a plumbing one.
+// There is exactly one root, Cosets.Root, and it covers the coset-wise oracle. The
+// flat codeword is no longer Merkle-committed at all: nothing verified against that
+// root, so building it was a hash pass for no verifier. See Commitment.Root.
 func CommitGroupWithFold(G sumcheck.GroupPoly, dom *Domain, k int, cfg FoldConfig) (*Commitment, *GroupOpeningHint, error) {
 	m, err := numVarsOf(len(G))
 	if err != nil {
@@ -383,23 +393,6 @@ func (h *GroupOpeningHint) numVars() int {
 	}
 
 	return n
-}
-
-// OpenLeaf returns the coset at the given leaf index together with its
-// authentication path, which is how a verifier's query on the oracle is answered.
-func (h *GroupOpeningHint) OpenLeaf(index int) ([]bls12381.G1Affine, *MerkleProof, error) {
-	if h == nil || h.Tree == nil {
-		return nil, nil, errors.WithMessage(ErrNilTree, "cannot open a leaf")
-	}
-	if index < 0 || index >= len(h.Leaves) {
-		return nil, nil, errors.Wrapf(ErrLeafIndexOutOfRange, "index %d is outside [0, %d)", index, len(h.Leaves))
-	}
-	proof, err := h.Tree.Prove(index)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	return h.Leaves[index], proof, nil
 }
 
 // chunkIntoCosets groups a flat codeword into contiguous blocks of 2^k points,

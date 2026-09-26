@@ -47,20 +47,15 @@ func TestCommitGroupRoundTrip(t *testing.T) {
 				c, hint, err := commitGroup(G, dom, k)
 				require.NoError(t, err, "m=%d d=%d k=%d", m, d, k)
 
-				require.Len(t, c.Root, DigestSize)
+				assert.Nil(t, c.Root, "the flat codeword is not committed; see Commitment.Root")
 				assert.Equal(t, m, c.NumVars)
 				assert.Equal(t, d, c.LogDomain)
 				assert.Equal(t, k, c.K)
 				assert.Equal(t, (1<<d)/(1<<k), c.NumLeaves)
 				require.Len(t, hint.Codeword, 1<<d)
-
-				// Every leaf must open against the published root.
-				for i := range c.NumLeaves {
-					coset, proof, err := hint.OpenLeaf(i)
-					require.NoError(t, err)
-					require.Len(t, coset, 1<<k)
-					assert.True(t, VerifyMerkleProof(c.Root, coset, proof),
-						"m=%d d=%d k=%d leaf=%d", m, d, k, i)
+				require.Len(t, hint.Leaves, c.NumLeaves)
+				for i, leaf := range hint.Leaves {
+					require.Len(t, leaf, 1<<k, "m=%d d=%d k=%d leaf=%d", m, d, k, i)
 				}
 			}
 		}
@@ -183,21 +178,27 @@ func TestCommitFieldIsDeterministic(t *testing.T) {
 	dom, err := NewDomain(5)
 	require.NoError(t, err)
 
-	a, _, err := commitField(f, gens, dom, 0)
+	_, ha, err := commitField(f, gens, dom, 0)
 	require.NoError(t, err)
-	b, _, err := commitField(f, gens, dom, 0)
+	_, hb, err := commitField(f, gens, dom, 0)
 	require.NoError(t, err)
-	assert.Equal(t, a.Root, b.Root)
+	// Asserted on the tier-1 group multilinear rather than on a Merkle root. The
+	// root used to stand in for "the commitment", but the flat codeword is no
+	// longer committed (see Commitment.Root) and G is what the root summarised --
+	// and is strictly stronger, since a digest could in principle collide where
+	// the coefficients cannot.
+	assert.Equal(t, ha.G, hb.G, "committing the same polynomial twice must agree")
+	assert.Equal(t, ha.Codeword, hb.Codeword)
 }
 
-func TestCommitFieldDistinctPolysGiveDistinctRoots(t *testing.T) {
+func TestCommitFieldDistinctPolysGiveDistinctCommitments(t *testing.T) {
 	f := randomFieldPoly(t, 6)
 	_, cols := matrixShape(6)
 	gens := testGenerators(t, cols)
 	dom, err := NewDomain(5)
 	require.NoError(t, err)
 
-	a, _, err := commitField(f, gens, dom, 0)
+	_, ha, err := commitField(f, gens, dom, 0)
 	require.NoError(t, err)
 
 	g := make(sumcheck.FieldPoly, len(f))
@@ -206,26 +207,26 @@ func TestCommitFieldDistinctPolysGiveDistinctRoots(t *testing.T) {
 	one.SetOne()
 	g[len(g)/3].Add(&g[len(g)/3], &one)
 
-	b, _, err := commitField(g, gens, dom, 0)
+	_, hb, err := commitField(g, gens, dom, 0)
 	require.NoError(t, err)
-	assert.NotEqual(t, a.Root, b.Root, "changing a coefficient must change the root")
+	assert.NotEqual(t, ha.G, hb.G, "changing a coefficient must change the commitment")
 }
 
-// TestCommitFieldDifferentGeneratorsGiveDifferentRoots guards against the row MSM
+// TestCommitFieldDifferentGeneratorsGiveDifferentCommitments guards against the row MSM
 // silently ignoring the generators (for example by using an offset slice).
-func TestCommitFieldDifferentGeneratorsGiveDifferentRoots(t *testing.T) {
+func TestCommitFieldDifferentGeneratorsGiveDifferentCommitments(t *testing.T) {
 	f := randomFieldPoly(t, 6)
 	_, cols := matrixShape(6)
 	dom, err := NewDomain(5)
 	require.NoError(t, err)
 
-	a, _, err := commitField(f, testGenerators(t, cols), dom, 0)
+	_, ha, err := commitField(f, testGenerators(t, cols), dom, 0)
 	require.NoError(t, err)
 
 	other := testGenerators(t, cols+1)[1:]
-	b, _, err := commitField(f, other, dom, 0)
+	_, hb, err := commitField(f, other, dom, 0)
 	require.NoError(t, err)
-	assert.NotEqual(t, a.Root, b.Root)
+	assert.NotEqual(t, ha.G, hb.G)
 }
 
 func TestCommitGroupValidation(t *testing.T) {
@@ -271,26 +272,6 @@ func TestCommitFieldValidation(t *testing.T) {
 	ragged := make(sumcheck.FieldPoly, 7) // not a power of two
 	_, _, err = commitField(ragged, testGenerators(t, cols), dom, 0)
 	assert.ErrorIs(t, err, ErrNotPowerOfTwo)
-}
-
-func TestOpenLeafValidation(t *testing.T) {
-	dom, err := NewDomain(5)
-	require.NoError(t, err)
-	_, hint, err := commitGroup(randomGroupPoly(t, 3), dom, 0)
-	require.NoError(t, err)
-
-	_, _, err = hint.OpenLeaf(-1)
-	assert.ErrorIs(t, err, ErrLeafIndexOutOfRange)
-	_, _, err = hint.OpenLeaf(1 << 5)
-	assert.ErrorIs(t, err, ErrLeafIndexOutOfRange)
-
-	var nilHint *GroupOpeningHint
-	_, _, err = nilHint.OpenLeaf(0)
-	assert.ErrorIs(t, err, ErrNilTree)
-
-	empty := &GroupOpeningHint{}
-	_, _, err = empty.OpenLeaf(0)
-	assert.ErrorIs(t, err, ErrNilTree)
 }
 
 func TestNumVarsOf(t *testing.T) {

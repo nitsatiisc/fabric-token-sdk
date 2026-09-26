@@ -2,8 +2,14 @@
 
 **Implementation**: [`token/core/zkatdlog/nogh/v1/crypto/titan`](../../token/core/zkatdlog/nogh/v1/crypto/titan)
 **Curve**: BLS12-381 (G1)
-**Status**: in progress — step 1 (oracle encoding) complete
-**Date**: 2026-09-25
+**Status**: in progress — the PCS is functional end to end (commit, open, verify, with the folding phase closing the claim); see §13.13 and "Deliberately not done" below for what remains
+**Date**: 2026-09-26
+
+**Companion documents**
+- [`titan-pcs-api.md`](titan-pcs-api.md) — the **public interface**: setup, prover, verifier, the matrix split, fold configuration, sentinel errors, and which polynomial sizes are usable. Start here to *use* the package.
+- [`titan-crypto.tex`](titan-crypto.tex) — the **construction in mathematical notation**, cross-referenced to the Titan paper's sections, including the deliberate departures from it.
+
+This page is the **implementation design record**: why the code is shaped the way it is, what the mutation passes found, and the defects that no functional test can see. It assumes you have read one of the two above.
 
 ## Table of Contents
 1. [Introduction](#1-introduction)
@@ -268,8 +274,15 @@ to agree; `matrixShape` asserts `rows*cols == 2^m` so the two cannot drift.
 ### 7.2 Tier 2: codeword to Merkle root
 
 `EncodeGroupOracle` (section 4) gives `|L|` group elements. Those are grouped into
-cosets of `2^k` points, each coset is one Merkle leaf, and the root is the
-commitment `[[G]]`.
+cosets of `2^k` points, each coset is one Merkle leaf, and a root over those leaves is
+the commitment `[[G]]`.
+
+> **The flat codeword is no longer committed.** The tree described here is built over
+> the *coset oracle* (`CommitCosets`, §13.1), not over the flat codeword. `commitGroup`
+> once built a second tree over the flat codeword too, published as `Commitment.Root`.
+> Nothing ever verified against it — the folding phase is the only stage that opens the
+> oracle, and it opens cosets — so that tree was a hash pass for no verifier and is no
+> longer built. `Commitment.Root` is now a reserved, always-nil field. See §7.6.
 
 ```
 hashLeaf(points) = SHA256(0x00 || p_0.Bytes() || ... || p_{2^k - 1}.Bytes())
@@ -359,6 +372,43 @@ reason, and "commitment" should not be read as "PCS complete".
 
 ---
 
+### 7.6 `Commitment.Root` is reserved and always nil
+
+The scheme has **one** root, `Cosets.Root`, over the coset-wise oracle. It did not
+always: `commitGroup` also built a tree over the flat codeword and published it as
+`Commitment.Root`, on the reasoning recorded in §13.1 — the flat codeword and the coset
+oracle are genuinely different objects, and a verifier confusing them should fail
+loudly rather than subtly.
+
+That reasoning was sound about the *objects* and wrong about the *conclusion*. Nothing
+ever verified against the flat root. `verifyFold` takes a `*CosetCommitment`, so its
+`c.Root` is `Cosets.Root`; both `eval.go` call sites pass `c.Cosets`. Across the whole
+non-test package `Commitment.Root` was **set once and read never** — the only readers
+were tests asserting the field against itself. The flat encoding is a computational
+stepping stone to the coset oracle, not a commitment anyone opens.
+
+Two costs, no benefit:
+
+1. **A hash pass for no verifier** — a full tree over `2^(RowVars+LogRate)` leaves.
+   Measured at `m = 12`: ~0.7% of commit time, 65 KB and ~1,050 allocations. Small,
+   because row MSMs and the FFT dominate; this was not the reason to remove it.
+2. **A footgun of exactly the kind this package keeps finding.** An exported `[]byte`
+   named `Root` invites a future batching or serialization layer to
+   `VerifyMerkleProof` against it. That check would *pass* while binding nothing the
+   protocol relies on — the same shape as the `chunkIntoCosets` comment that was wrong
+   in the way it warned about (§13.1).
+
+So the tree is not built and the field is nil. It is **kept, reserved**, rather than
+deleted: the name stays claimed, and nil makes the misuse above fail immediately
+instead of silently. `GroupOpeningHint.Tree` and its `OpenLeaf` method went with it —
+they were the prover-side counterpart to the same unread root.
+
+Three tests used `Root` as a proxy for "the commitment changed" (determinism, distinct
+polynomials, distinct generators). Those properties are real, so the tests were
+re-pointed at the tier-1 group multilinear `hint.G` rather than deleted — which is
+strictly stronger, since a digest could in principle collide where the coefficients
+cannot.
+
 ## 8. API
 
 ```go
@@ -433,9 +483,9 @@ field one and runs both tiers. Both return a `*Commitment` for the verifier and 
 opening hint that is **prover state and must not be sent**.
 
 There is no unfolded variant in the public API, and that is deliberate. The stages that
-commit the flat codeword alone (`commitField`, `commitGroup`) are unexported: such a
-commitment lets a verifier *reduce* an evaluation claim without closing it, so its
-openings do not bind, and it is never what a caller wants. They exist only as the first
+precede the coset oracle (`commitField`, `commitGroup`) are unexported: they commit
+**nothing at all** now that the flat tree is gone (§7.6), so a `Commitment` from them
+has a nil `Root` *and* a nil `Cosets` and binds nothing. They exist only as the first
 half of the `WithFold` constructors. Most callers should not use either directly — the
 [PCS facade](#1312-the-pcs-facade) is the intended entry point.
 
@@ -471,27 +521,29 @@ if err != nil {
 }
 ```
 
-A query on the oracle is answered by a coset plus its authentication path:
+A query on the oracle is answered by a coset plus its authentication path. The oracle
+is the coset-wise one, so the opener hangs off `hint.Cosets` and the root to check is
+`c.Cosets.Root` — **not** `c.Root`, which is nil and reserved (§7.6):
 
 ```go
-coset, proof, err := hint.OpenLeaf(idx)
+coset, proof, err := fhint.Cosets.OpenCoset(idx)
 if err != nil {
-    return errors.Wrapf(err, "failed to open leaf %d", idx)
+    return errors.Wrapf(err, "failed to open coset %d", idx)
 }
-if !titan.VerifyMerkleProof(c.Root, coset, proof) {
+if !titan.VerifyMerkleProof(c.Cosets.Root, coset, proof) {
     return errors.New("merkle proof did not verify")
 }
 ```
 
-`Commitment` carries `NumVars`, `LogDomain`, `K` and `NumLeaves` alongside `Root`,
-because a root alone is ambiguous across parameter choices — a verifier must check
-the shape against what it expects rather than trusting the prover's.
+`Commitment` carries `NumVars`, `LogDomain`, `K`, `NumLeaves` and `ColVars`, because a
+root alone is ambiguous across parameter choices — a verifier must check the shape
+against what it expects rather than trusting the prover's.
 
 `gens` comes from the caller: the field commitment performs no trusted setup, and generator
 provenance is a separate question this package does not answer. At least `cols`
 generators are required (`ErrInsufficientGenerators`).
 
-Committing is not opening: `Commitment` plus `OpenLeaf` is binding and queryable by
+Committing is not opening: `Commitment` plus `OpenCoset` is binding and queryable by
 *position*, and proving `f(alpha) = sigma` is [section 12](#12-evaluation).
 
 `VerifyMerkleProof` returns a `bool`, not an `error`, because every failure is the
@@ -672,7 +724,7 @@ so the Go verifier must be written from the paper rather than ported.
 | `groupsumcheck_test.go` | round-trip for `m ∈ {1,2,3,4,6,8,10}` against a direct `f(alpha)`; residual claim equals `eq(alpha,R)*f(R)`; split invariance over all `ell`; MSM-vs-folklore round-message agreement; cross-check against `crypto/sumcheck`; `S`-table telescoping; `eq` table vs `eqPoint` and partition-of-unity; fold-convention pinning; batch inversion; quadratic interpolation; negatives (wrong sum, tampered first/middle/last round, compensating tamper, dropped round, wrong `ell`, wrong `alpha`); `alpha ∈ {0,1}` returning an error rather than panicking; input immutability; validation |
 | `groupsumcheck_bench_test.go` | prover at `m ∈ {8,10,12}`, the `ell` sweep, and the verifier |
 | `merkle_test.go` | round-trip at every index of trees with `2^0..2^10` leaves × coset dims `k ∈ {0,1,2}`; independent naive recursive root; second-preimage separation; known-answer leaf hash pinning the compressed encoding; wrong leaf / wrong index / tampered sibling / swapped sibling order; wrong proof length, empty path against a deep tree, and truncation at every length; `hashNode` length framing; malformed input; `BuildTree`/`Prove` validation; batch proofs; `Root` returning a copy; determinism; distinct leaves ⇒ distinct roots; `treeDepth` |
-| `commit_test.go` | `CommitGroup` round-trip; leaves are a partition of the codeword in order; tier 1 against a direct per-row MSM; the group poly *is* the evaluation table; odd-`m` matrix shape table; determinism; distinct polys and distinct generators ⇒ distinct roots; validation for `CommitGroup`, `CommitField`, `OpenLeaf`; `numVarsOf` |
+| `commit_test.go` | `CommitGroup` round-trip; leaves are a partition of the codeword in order; tier 1 against a direct per-row MSM; the group poly *is* the evaluation table; odd-`m` matrix shape table; determinism; distinct polys and distinct generators ⇒ distinct commitments (asserted on the tier-1 group multilinear, not a root — §7.6); `Commitment.Root` is nil; validation for `CommitGroup`, `CommitField`; `numVarsOf` |
 | `merkle_fuzz_test.go` | `FuzzVerifyMerkleProof`: never panics, never accepts |
 | `merkle_bench_test.go` | `BuildTree` at `2^8..2^14`; 1/10/100 openings; verify at two depths; `CommitField` at `m ∈ {10,12,14}` |
 | `bridge_test.go` | scalar-field order equality pinned as a regression test; G1 round-trip (generator, scalar multiple, negated); infinity rejected; the offending index named on slice conversion; `Zr` round-trip over `0,1,2,255,256,65535,2^40,r-1` and random; add and mul agreeing across the boundary; all four BLS12-381 curve variants preserving the caller's ID; validation; `padTo32` |
