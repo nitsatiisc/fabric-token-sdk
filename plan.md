@@ -37,7 +37,13 @@
 >    crossover. The godoc claims the butterfly wins when most of the codeword is wanted;
 >    that is reasoning, not measurement, and is flagged as such in the godoc.
 >
-> **Next structural step (a new plan, not step 5):** the verifier is still linear in
+> **Step 6 is planned at the end of this file:** make the outer split `m1` a parameter
+> instead of hardcoding `m/2`, as the Rust `TitanSetupConfig` does. Default stays `m/2`
+> (Rust's `m/2 - 2` is affordable only because it folds the generator oracle, which we do
+> not). Watch `splitAlpha`, which hardcodes `m/2` independently of `matrixShape` and would
+> fail *silently* if they diverged.
+>
+> **Next structural step after that:** the verifier is still linear in
 > `2^(m−ℓ)` because `Reduced` is sent in plain. Batching removed the factor of `Q`, not
 > the term. Recursing instead of sending it — fold again over the reduced oracle, repeat
 > until small enough to send — is WHIR proper and is what makes the verifier
@@ -561,3 +567,94 @@ Verification: suite green, race-clean (79.6s), `go vet` clean, `gofmt` clean, co
   foreign-root subtest rebuilt the *same* tree and passed vacuously. Caught because the
   subtest failed when it should have; now perturbs a leaf and asserts the roots differ
   via `require.NotEqual`, so it cannot silently degenerate again.
+
+---
+
+# Step 6 — Make the outer split (`m1`) a parameter
+
+## Goal
+
+The matrix split is hardcoded at `commit.go:379`:
+
+```go
+cols = 1 << (m / 2)
+rows = 1 << (m - m/2)
+```
+
+The Rust reference treats it as a **tuned free parameter**, `TitanSetupConfig.m1`
+(`titanpcs.rs:67`), and its shipped configs are deliberately asymmetric:
+
+| m | m1 | m2 = m−m1 | l1 | domain_g1 | queries |
+|---|----|-----------|----|-----------|---------|
+| 18 | 8 | 10 | 1 | 11 | 70 |
+| 20 | 8 | 12 | 1 | 11 | 70 |
+| 22 | 9 | 13 | 2 | 11 | 70 |
+| 24 | 10 | 14 | 2 | 12 | 70 |
+| 26 | 11 | 15 | 3 | 12 | 70 |
+
+At m=20 Rust uses `m1 = 8` where we force 10. Step 6 makes `m1` settable, keeping
+`m1 = m/2` as the default.
+
+## Why `m1 = m/2` here, and not Rust's `m/2 − 2`
+
+Rust can afford a *smaller* `m1` because it folds the generator oracle too: `m2` is
+the CSP/Bulletproof half, and `l2` folds it, so a larger `m2` stays cheap. **We do
+not fold leg 2** (that is the deferred `O(n^¼)` layer), so every extra variable in
+`m2` is paid in full as a linear CSP cost. `m1 = m/2` keeps leg 2 as small as the
+split allows, which is the right default until `l2` exists.
+
+This is the user's decision and the reason is recorded because it will look
+arbitrary to anyone comparing against the Rust config table.
+
+## What this also fixes
+
+`checkShape` (`eval.go:523`) documents that **`m` is not recoverable from the
+commitment**: `NumVars = log2(rows)` is consistent with both `m = 2·NumVars` and
+`m = 2·NumVars − 1`, because the column count is not on the wire. Its godoc says
+"Callers who need the column count on the wire should put it in the commitment; that
+is a format change, noted rather than made here."
+
+Carrying `m1` in the commitment is exactly that format change, so step 6 should make
+it and let `checkShape` stop reasoning about ambiguity.
+
+**It should also remove the `m ≡ 0 mod 4` constraint** (§13.10). That rule exists
+only because `rowVars = m − m/2` must be even for the fold to attach; with `m1`
+chosen directly the caller picks an even `m1` and odd total `m` becomes usable —
+which is why Rust runs m=18 and m=26 happily. Verify this rather than assume it.
+
+## Steps
+
+- [ ] 6.1 `matrixShape(m)` → `matrixShape(m, m1)`, or a `Split` type carrying
+      `{M, M1}` with `Rows()`/`Cols()`. Prefer the latter: it gives one place to
+      validate and prevents the two call sites drifting.
+- [ ] 6.2 **`splitAlpha` (`eval.go:520`) independently hardcodes `m/2`** and must take
+      the same split. This is the dangerous one: `eq` factorizes over *any* split, so a
+      mismatch between `splitAlpha` and `matrixShape` produces a proof that **verifies
+      against itself** for a different polynomial. The existing godoc already warns
+      about exactly this. Pin with a test that checks against an independently computed
+      `f(alpha)` at an asymmetric `m1`.
+- [ ] 6.3 Thread `m1` into `FieldSetup` (`pcs.go`): a config field with `m/2` default,
+      plus validation (`1 ≤ m1 < m`, `m1` even for the fold to attach, generator count
+      from the new `cols`).
+- [ ] 6.4 Put `m1` (or the column count) in `Commitment`, and simplify `checkShape`.
+      **Format change** — note it as such.
+- [ ] 6.5 Revisit `DefaultEll`/`DefaultFoldConfig`: `Ell` is relative to `m1` now, and
+      the drawability floor (§13.10) moves with it.
+- [ ] 6.6 Tests: round trip at asymmetric `m1`; the `splitAlpha` consistency test of
+      6.2; odd `m` now working; the Rust table above as shape vectors; `m1 = m/2`
+      unchanged from today (regression).
+- [ ] 6.7 Benchmark the `m1` sweep at fixed `m`, to see whether `m/2` is actually the
+      optimum for *our* cost model (no `l2`). If it is not, say so rather than keeping
+      the default on faith.
+- [ ] 6.8 Docs: §13.10 (the mod-4 rule, if it goes away), §8.1, the new §13.14, and
+      the `checkShape` godoc.
+
+## Notes & Decisions — step 6
+
+- **Query count differs from Rust and is not reconciled here.** Rust uses 70 queries
+  where `QueryCount(128, 3, Capacity)` gives 43. That is a soundness-target or regime
+  difference, not a consequence of `m1`, and it deserves its own investigation rather
+  than being quietly aligned.
+- `domain_g1_size` is a Rust config field we derive instead (`rowVars + LogRate`).
+  Leaving it derived is correct — §13.12's mutation finding showed an oversized domain
+  is invisible to every functional test, so it should not be hand-settable.
