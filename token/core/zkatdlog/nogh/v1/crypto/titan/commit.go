@@ -194,6 +194,48 @@ func commitGroup(G sumcheck.GroupPoly, dom *Domain, k int) (*Commitment, *GroupO
 	return c, hint, nil
 }
 
+// groupShape is commitGroup without the flat encoding: it validates the inputs and
+// fills in the same shape fields, but leaves Codeword and Leaves nil.
+//
+// It exists because the flat codeword is never opened. The fold commits to the
+// coset-wise oracle, which EncodeCosets builds from G directly rather than by
+// regrouping the flat codeword (see TestEncodeCosetsIsNotARegroupingOfTheFlatCodeword),
+// and no proof or verifier reads Codeword or Leaves. Encoding it anyway was a second
+// full group FFT per commitment -- measured at ~60% of CommitGroupWithFold on a
+// 2^12-point polynomial -- for data nobody reads. The shape fields are unchanged, so
+// the commitment is identical to what commitGroup would have produced.
+func groupShape(G sumcheck.GroupPoly, dom *Domain, k int) (*Commitment, *GroupOpeningHint, error) {
+	if dom == nil {
+		return nil, nil, errors.WithMessage(ErrNilDomain, "cannot commit a group polynomial")
+	}
+	if G == nil {
+		return nil, nil, errors.WithMessage(ErrNilPolynomial, "cannot commit a group polynomial")
+	}
+	numVars, err := numVarsOf(len(G))
+	if err != nil {
+		return nil, nil, err
+	}
+	if dom.LogSize < numVars {
+		return nil, nil, errors.Wrapf(ErrDomainTooSmall, "domain 2^%d is smaller than the polynomial 2^%d", dom.LogSize, numVars)
+	}
+	// The same coset-dimension checks chunkIntoCosets applies to the codeword.
+	if k < 0 {
+		return nil, nil, errors.Wrapf(ErrInvalidCosetDim, "coset dimension %d is negative", k)
+	}
+	if k > dom.LogSize {
+		return nil, nil, errors.Wrapf(ErrInvalidCosetDim, "cannot split %d codeword points into cosets of %d", 1<<dom.LogSize, 1<<k)
+	}
+
+	c := &Commitment{
+		NumVars:   numVars,
+		LogDomain: dom.LogSize,
+		K:         k,
+		NumLeaves: 1 << (dom.LogSize - k),
+	}
+
+	return c, &GroupOpeningHint{G: G}, nil
+}
+
 // CommitGroupWithFold commits a group multilinear together with the coset-wise
 // oracle the folding phase queries, giving an opening that can be *closed* rather
 // than only reduced.
@@ -220,7 +262,7 @@ func CommitGroupWithFold(G sumcheck.GroupPoly, dom *Domain, k int, cfg FoldConfi
 		return nil, nil, err
 	}
 
-	c, hint, err := commitGroup(G, dom, k)
+	c, hint, err := groupShape(G, dom, k)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -261,10 +303,10 @@ func commitField(f sumcheck.FieldPoly, gens []bls12381.G1Affine, dom *Domain, k 
 		// Defer the report to commitFieldAt, which handles a nil or ragged f with the
 		// right sentinel. A zero Split would otherwise fail validation first and
 		// blame the split for what is really the caller's polynomial.
-		return commitFieldAt(f, gens, dom, k, Split{})
+		return commitFieldAt(f, gens, dom, k, Split{}, true)
 	}
 
-	return commitFieldAt(f, gens, dom, k, DefaultMatrixSplit(m))
+	return commitFieldAt(f, gens, dom, k, DefaultMatrixSplit(m), true)
 }
 
 // Compile-time note: DefaultMatrixSplit(0) is Split{0, 0}, which Validate rejects
@@ -280,7 +322,11 @@ func commitField(f sumcheck.FieldPoly, gens []bls12381.G1Affine, dom *Domain, k 
 // The split must be the same one the opening uses, or the two legs describe
 // different polynomials; it reaches the verifier through the commitment rather than
 // being re-derived, which is what keeps the two sides from drifting.
-func commitFieldAt(f sumcheck.FieldPoly, gens []bls12381.G1Affine, dom *Domain, k int, split Split) (*Commitment, *FieldOpeningHint, error) {
+//
+// encodeFlat selects the tier-2 stage: true runs commitGroup, which also encodes
+// the flat codeword, as the commitField stage and its tests expect; false runs
+// groupShape, which the fold path uses because nothing reads the flat codeword.
+func commitFieldAt(f sumcheck.FieldPoly, gens []bls12381.G1Affine, dom *Domain, k int, split Split, encodeFlat bool) (*Commitment, *FieldOpeningHint, error) {
 	if f == nil {
 		return nil, nil, errors.WithMessage(ErrNilPolynomial, "cannot commit a field polynomial")
 	}
@@ -318,7 +364,11 @@ func commitFieldAt(f sumcheck.FieldPoly, gens []bls12381.G1Affine, dom *Domain, 
 		G[j] = v
 	}
 
-	c, gh, err := commitGroup(G, dom, k)
+	stage := groupShape
+	if encodeFlat {
+		stage = commitGroup
+	}
+	c, gh, err := stage(G, dom, k)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -363,7 +413,7 @@ func CommitFieldWithFoldAt(f sumcheck.FieldPoly, gens []bls12381.G1Affine, dom *
 		return nil, nil, err
 	}
 
-	c, hint, err := commitFieldAt(f, gens, dom, k, split)
+	c, hint, err := commitFieldAt(f, gens, dom, k, split, false)
 	if err != nil {
 		return nil, nil, err
 	}

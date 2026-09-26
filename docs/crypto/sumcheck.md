@@ -256,6 +256,122 @@ When these entry points are used, the package applies **no** domain separation a
 **no** shape binding of its own — the caller owns both. Verification must run against
 a transcript in an identical state, or every challenge diverges.
 
+### 4.6 Sum-of-Products Claims (`MultiClaim`)
+
+A `Claim` is one product. A protocol that needs a polynomial `Phi(h_1, ..., h_p)` of
+several multilinears — a sum of structurally different products with public
+coefficients — uses `MultiClaim`. It is the wrapper that lifts sum-check from one
+product to `Phi` of several polynomials, and it is what the
+[pivot protocol](pivot.md) uses for its field constraint and its sparse-product
+check.
+
+```
+H = Σ_{x ∈ {0,1}^mu}  Σ_j  c_j · Π_{i ∈ S_j} h_i(x)
+```
+
+#### 4.6.1 Types
+
+```go
+// Term is one product: Coeff times the pool polynomials named by Factors.
+// An index may repeat (a power). Factors must be non-empty.
+type Term struct {
+    Coeff   fr.Element
+    Factors []int
+}
+
+// MultiClaim: the pool of multilinears and the terms over it.
+type MultiClaim struct {
+    Polys []FieldPoly
+    Terms []Term
+}
+
+// MultiShape is the public shape a verifier needs.
+type MultiShape struct {
+    NumVars int
+    Degree  int
+}
+```
+
+| Method / function | Returns |
+|---|---|
+| `(*MultiClaim).NumVars() int` | the number of variables shared by the pool |
+| `(*MultiClaim).Degree() int` | the round degree: the largest `len(Factors)` of any term |
+| `(*MultiClaim).Shape() MultiShape` | `{NumVars, Degree}`, to hand to the verifier |
+| `(*MultiClaim).Evaluate(evals []fr.Element) (fr.Element, error)` | `Phi` at the pool values `evals` |
+| `EvaluateTerms(terms []Term, evals []fr.Element) (fr.Element, error)` | the same, for a verifier that holds the terms but not the pool |
+
+#### 4.6.2 Proving and verifying
+
+```go
+func ProveMulti(curve *mathlib.Curve, claim *MultiClaim) (*Proof, *Opening, error)
+func ProveMultiWithTranscript(curve *mathlib.Curve, claim *MultiClaim, tr *csp.Transcript) (*Proof, *Opening, error)
+
+func VerifyMulti(curve *mathlib.Curve, shape MultiShape, proof *Proof) (*Opening, error)
+func VerifyMultiWithTranscript(curve *mathlib.Curve, shape MultiShape, proof *Proof, tr *csp.Transcript) (*Opening, error)
+```
+
+The proof is an ordinary `Proof` with `FieldRounds` and `FieldSum` set: one round
+polynomial per variable, as `Degree + 1` evaluations. `ProveMulti` folds a deep copy,
+so the caller's tables are not modified.
+
+| `Opening` field | Set by `ProveMulti` | Set by `VerifyMulti` |
+|---|---|---|
+| `R` | ✅ challenge point, folding order | ✅ same point |
+| `FieldEvals` | ✅ one value per **pool** entry, `h_i(R)` | ❌ nil |
+| `Product` | ❌ nil | ✅ `p(R) = Phi(h_1(R), …)` |
+
+A nil error from `VerifyMulti` means only that the sum follows from the residual
+claim. The caller closes it by obtaining the pool values at `R` — from a commitment
+opening, or directly — and checking
+`EvaluateTerms(terms, values) == opening.Product`.
+
+#### 4.6.3 Example
+
+`ExampleProveMulti` (in `multi_example_test.go`, run by `go test`) proves
+`Φ(h0, h1) = 2·h0·h1 − h1²` over two variables:
+
+```go
+claim := &sumcheck.MultiClaim{
+    Polys: []sumcheck.FieldPoly{h0, h1},
+    Terms: []sumcheck.Term{
+        {Coeff: two, Factors: []int{0, 1}},      // 2 h0 h1
+        {Coeff: minusOne, Factors: []int{1, 1}}, // - h1^2
+    },
+}
+proof, _, err := sumcheck.ProveMulti(curve, claim)
+opening, err := sumcheck.VerifyMulti(curve, claim.Shape(), proof)
+
+// close the residual claim at opening.R
+evals := []fr.Element{h0(R), h1(R)}             // from a commitment opening
+phi, err := sumcheck.EvaluateTerms(claim.Terms, evals)
+ok := phi.Equal(productOf(opening))             // opening.Product as fr.Element
+```
+
+#### 4.6.4 Rules and errors
+
+- **Structure:** at least one pool polynomial and one term, and every pool
+  polynomial with the same number of variables (≥ 1) and a power-of-two table.
+  Violations return `ErrNoFactors`, `ErrNumVarsMismatch` or `ErrNotPowerOfTwo`.
+- **Terms:** every term has at least one factor (`ErrNoFactors`), and every index is
+  in range (`ErrFactorIndex`). A constant term can be written with a factor that is
+  the all-ones table.
+- **Degree:** the round degree is the largest term degree. Shorter terms are evaluated
+  at the same points, which is the same as padding them. A verifier that passes a
+  different degree gets `ErrRoundDegreeMismatch`.
+- **Field only:** group factors are not supported in a `MultiClaim`. A product with
+  one group factor is a `Claim`.
+- **Sharing:** a polynomial used by several terms, or squared, is stored and folded
+  once. The cost per round point is one addition per pool entry plus one
+  multiplication per factor occurrence.
+- **Transcript:** the standalone entry points bind `(NumVars, Degree)` under the
+  sum-check domain with a kind byte of `2`, so a multi proof cannot be replayed as a
+  single-product proof of the same size (`TestMultiRejectsTampering`). The
+  `WithTranscript` variants leave domain separation and shape binding to the caller,
+  as in §4.5.
+- **Equivalence:** a one-term `MultiClaim` produces exactly the proof `Prove` produces
+  for the equivalent `Claim` under the same transcript
+  (`TestMultiSingleTermMatchesClaim`).
+
 ## 5. Transcript and Fiat–Shamir
 
 The package reuses `crypto/rp/csp.Transcript`, the same chained SHA-256 transcript

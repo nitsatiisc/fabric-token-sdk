@@ -8,11 +8,14 @@ package validator_test
 
 import (
 	"context"
+	"os"
 	"runtime"
+	"strconv"
 	"testing"
 
 	math "github.com/IBM/mathlib"
 	"github.com/LFDT-Panurus/panurus/token/core/zkatdlog/nogh/v1/benchmark"
+	"github.com/LFDT-Panurus/panurus/token/core/zkatdlog/nogh/v1/crypto/pivot/utxo"
 	"github.com/LFDT-Panurus/panurus/token/core/zkatdlog/nogh/v1/crypto/rp"
 	testing2 "github.com/LFDT-Panurus/panurus/token/core/zkatdlog/nogh/v1/testutils"
 	"github.com/LFDT-Panurus/panurus/token/driver"
@@ -242,4 +245,117 @@ func BenchmarkValidatorTransferCSP64(b *testing.B) {
 			return err
 		},
 	)
+}
+
+// BenchmarkAggregatedTransfersVsNaive compares K naive transfers with one aggregated
+// proof of the same K transfers, under the configuration of
+// BenchmarkValidatorTransferCSP64: 2-input, 2-output transfers, idemixnym owners and
+// 64-bit CSP range proofs, on BLS12-381.
+//
+// For each K it reports four sub-benchmarks, each timing the whole batch of K:
+//
+//   - naive/prove: K runs of the production sender -- the transfer action with its
+//     type-and-sum and range proofs, and the input owners' signatures (an Idemix
+//     proof of knowledge of the credential plus a pseudonym signature each).
+//     Auditing and endorsement are not included.
+//   - naive/verify: K runs of the validator on a transfer request, as
+//     BenchmarkValidatorTransferCSP64 measures one; this includes the auditor's
+//     signature check, which the aggregated proof does not replace.
+//   - aggregated/prove and aggregated/verify: one utxo.Prove and one utxo.Verify
+//     over the K transfers' statements, read off K naive actions, so both sides
+//     consume the same commitments, owner pseudonyms and public parameters.
+//
+// Proof size is reported as the proof-bytes metric: for naive transfers the ZK proof
+// and owner signatures of all K, for the aggregated proof its full size with
+// compressed points (see utxo.Proof.Size). Public data both carry -- commitments,
+// owner identities -- is not counted.
+func BenchmarkAggregatedTransfersVsNaive(b *testing.B) {
+	const bits = uint64(64)
+	curve := math.BLS12_381_BBS_GURVY
+	configurations, err := benchmark.NewSetupConfigurationsWithParams(benchmark.SetupParams{
+		IdemixTestdataPath: "./../testdata",
+		Bits:               []uint64{bits},
+		CurveIDs:           []math.CurveID{curve},
+		OwnerIdentityType:  idemixnym.IdentityType,
+		ProofType:          rp.CSPRangeProofType,
+	})
+	require.NoError(b, err)
+	bc := &benchmark2.Case{Bits: bits, CurveID: curve, NumInputs: 2, NumOutputs: 2}
+
+	env, err := testing2.NewEnv(bc, configurations)
+	require.NoError(b, err)
+	prover, err := testing2.NewTransferProver(bc, configurations)
+	require.NoError(b, err)
+	params, err := utxo.NewParams(prover.PP)
+	require.NoError(b, err)
+	signerConfig, err := os.ReadFile("./../testdata/bls12_381_bbs/idemix/user/SignerConfig")
+	require.NoError(b, err)
+	owner, err := params.LoadOwnerSecrets(signerConfig, prover.Owner.AuditInfo)
+	require.NoError(b, err)
+	msg := []byte("aggregated transfer payload")
+
+	for _, k := range []int{8, 32, 64, 128} {
+		// K naive transfers, and the aggregated statements and witnesses read off them.
+		sts := make([]*utxo.TransferStatement, k)
+		wits := make([]*utxo.TransferWitness, k)
+		naiveBytes := 0
+		for i := range k {
+			nt, err := prover.Prove(b.Context(), strconv.Itoa(i))
+			require.NoError(b, err)
+			naiveBytes += nt.ProofSize()
+			sts[i], err = utxo.StatementFromAction(nt.Action)
+			require.NoError(b, err)
+			wit := &utxo.TransferWitness{Type: params.TypeScalar("ABC"), Owners: [2]*utxo.OwnerSecrets{owner, owner}}
+			for j := range 2 {
+				wit.Inputs[j], err = params.OpeningFromMetadata(nt.Inputs[j])
+				require.NoError(b, err)
+				wit.Outputs[j], err = params.OpeningFromMetadata(nt.Outputs[j])
+				require.NoError(b, err)
+			}
+			wits[i] = wit
+		}
+		setup, err := utxo.NewSetup(params, k)
+		require.NoError(b, err)
+		proof, err := utxo.Prove(setup, msg, sts, wits)
+		require.NoError(b, err)
+		require.NoError(b, utxo.Verify(setup, msg, sts, proof))
+
+		prefix := "K=" + strconv.Itoa(k)
+		b.Run(prefix+"/naive/prove", func(b *testing.B) {
+			for b.Loop() {
+				for i := range k {
+					if _, err := prover.Prove(b.Context(), strconv.Itoa(i)); err != nil {
+						b.Fatal(err)
+					}
+				}
+			}
+			b.ReportMetric(float64(naiveBytes), "proof-bytes")
+		})
+		b.Run(prefix+"/naive/verify", func(b *testing.B) {
+			for b.Loop() {
+				for range k {
+					if _, _, err := env.Engine.VerifyTokenRequestFromRaw(b.Context(), nil, "1", env.TRWithTransferRaw); err != nil {
+						b.Fatal(err)
+					}
+				}
+			}
+			b.ReportMetric(float64(naiveBytes), "proof-bytes")
+		})
+		b.Run(prefix+"/aggregated/prove", func(b *testing.B) {
+			for b.Loop() {
+				if _, err := utxo.Prove(setup, msg, sts, wits); err != nil {
+					b.Fatal(err)
+				}
+			}
+			b.ReportMetric(float64(proof.Size()), "proof-bytes")
+		})
+		b.Run(prefix+"/aggregated/verify", func(b *testing.B) {
+			for b.Loop() {
+				if err := utxo.Verify(setup, msg, sts, proof); err != nil {
+					b.Fatal(err)
+				}
+			}
+			b.ReportMetric(float64(proof.Size()), "proof-bytes")
+		})
+	}
 }

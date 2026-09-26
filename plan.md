@@ -1,3 +1,118 @@
+# Plan: R_utxo aggregation on the pivot protocol, and its benchmark
+
+Goal: aggregate K naive 2x2 zkatdlog transfers (IdemixNym owners, CSP range proofs) into one
+proof of R_utxo on top of `crypto/pivot`, consuming the same public parameters and public data
+as the naive transfers, and benchmark it against K naive transfers in `validator_test.go`
+(prover time, proof size, verifier time). Add API documentation for `sumcheck.MultiClaim`.
+
+## Steps
+
+1. Probe the fixtures: curve equality, mathlib/gnark conversions, credential parsing, BBS+
+   pairing, EidNym opening.
+2. `crypto/pivot/utxo`: params from token pp, slot layout, equation list -> collapse (eta, xi),
+   instance building (credential randomisation, range bits), Prove/Verify with the deferred
+   checks (aggregated pairings, A' != 0, aggregated Schnorr bound to M), proof size.
+3. `testutils.TransferProver`: re-runnable production sender for naive transfers + openings.
+4. Tests on real naive transfers: honest equations, round trips, one bad transfer among K
+   (four ways), tampering.
+5. `BenchmarkAggregatedTransfersVsNaive` in `validator/validator_test.go`.
+6. Docs: MultiClaim API reference + runnable example; `docs/crypto/pivot-utxo.md`; pivot.md API.
+
+## Implementation Progress
+
+- [x] 1. Probe — all assumptions hold (curve 7 for both; `eid` is credential attribute 2,
+  on `h_4`).
+- [x] 2. utxo package — `params.go`, `layout.go`, `relation.go`, `witness.go`, `utxo.go`,
+  `size.go`. `pivot.Prove` now also returns the `Outcome`; `pivot.EqTable` exported.
+- [x] 3. `testutils/transfer_prover.go`.
+- [x] 4. `utxo_test.go` — green; negatives fail at the intended check (forged credential at the
+  aggregated pairing, bad opening/owner at the SC2 sum, flipped bit at SC3).
+- [x] 5. Benchmark — K = 2, 8, 32; results recorded in `docs/crypto/pivot-utxo.md` §7.
+- [x] 6. Docs — `sumcheck.md` §4.6 rewritten as an API reference, `multi_example_test.go`,
+  `pivot-utxo.md` (linked from docs/README.md), `pivot.md` API.
+
+### Follow-up: prover performance (K = 64)
+
+- [x] Benchmark K = 64: aggregated prover was 16.1 s vs 7.0 s naive. Profile: Titan group
+  commitment to H ~90%.
+- [x] (a) titan: the fold path skips the unread flat codeword (`groupShape`); commitments
+  unchanged, pinned by tests.
+- [x] (b) pivot: per-instance public group elements move from committed columns of H to an
+  uncommitted `Statement.Public` table, handled by SC1Pub and closed by the verifier's own MSM;
+  SC4 gained a term; the public-column batch claims are gone. utxo keeps 9 private slots
+  (c = 16/32).
+- [x] Re-benchmarked: K = 64 prover 2.92 s (2.4x faster than naive), verify 77 ms, 84 KB.
+
+## Notes & Decisions
+
+- The pivot parameters are generated from an explicit list of the 16 group equations, not
+  hand-written, so the collapse cannot drift from the equations.
+- c = 32 or 64 group slots depending on the parity of log K; the field split is chosen with an
+  even row half. K is any power of two >= 2.
+- The aggregating prover needs every owner's sk and credential (they are witness).
+- Naive verify timing includes the validator's auditor-signature check; naive prove excludes
+  auditing.
+- `make lint` still cannot run here (golangci-lint built with Go 1.25).
+
+---
+
+# Plan: pivot meta-protocol (mixed-witness aggregation)
+
+Goal: implement the meta-protocol of the mixed-witness-aggregation write-up (`src/meta-protocol.tex`,
+blueprint `mixed-witness-aggregation/design/pivot-protocol-blueprint.md`) as a Go package
+`token/core/zkatdlog/nogh/v1/crypto/pivot`, proving the aggregate pivot relation over K instances
+with the Titan field and group PCSes and sum-check.
+
+Scope of this plan: the generic meta-protocol (SC1-SC4, evaluation-claim batching, one PCS opening
+per oracle, public and revealed column slices). The R_utxo-specific checks that sit on top
+(pairings, A' != 0, aggregated Schnorr) are out of scope and come in a follow-up.
+
+## Steps
+
+1. `sumcheck.MultiClaim`: sum-of-products claims over a shared pool of field polynomials
+   (the Phi(h_1..h_p) wrapper), with `ProveMulti[WithTranscript]` / `VerifyMulti[WithTranscript]`.
+2. `titan`: commit without fixing the evaluation point, open later (`ProveAt` on both provers).
+3. `pivot` scaffolding: sizes/setup, relation (alpha, sparse B and Gamma, G, G0, affine forms,
+   Phi monomials), witness, statement, eq helpers, table-order conversion, transcript encoding.
+4. Prover and verifier: SC1, SC2, SC3 (MultiClaim), SC4 (MultiClaim), W and g evaluation-claim
+   batching, one field and one group PCS opening.
+5. Tests: honest round trip at two sizes (default and custom field split), a corrupted instance
+   among K rejected (group equation and field constraint), public column mismatch rejected,
+   tampered proof values rejected.
+6. Docs: `docs/crypto/sumcheck.md` (MultiClaim), `docs/crypto/titan.md` (ProveAt),
+   new `docs/crypto/pivot.md`.
+
+## Implementation Progress
+
+- [x] 1. MultiClaim — `sumcheck/multi.go`: pool of FieldPolys + terms naming them by index;
+  standalone transcripts use kind byte 2. Tests: brute force, one-term == Claim, tampering,
+  validation.
+- [x] 2. titan ProveAt — nil `Alpha` allowed at construction, `ProveAt(alpha)` on both
+  provers. Tests open one commitment at three points.
+- [x] 3. pivot scaffolding — `params.go`, `math.go`, `transcript.go`, `batch.go`, `proof.go`.
+- [x] 4. prover/verifier — `prover.go`, `verifier.go`; SC3's residual folded into SC4 as a
+  third term.
+- [x] 5. tests — `pivot_test.go`: pass, race-clean, 87.3% coverage. sumcheck and titan
+  suites still pass.
+- [x] 6. docs — `docs/crypto/pivot.md` (new, linked from docs/README.md), sumcheck.md §4.6,
+  titan.md §13.12.
+
+Not done: `make lint` could not run — the installed golangci-lint is built with Go 1.25 and
+refuses the Go 1.26.5 module. No GitHub issue opened, nothing committed or pushed.
+R_utxo-specific checks (pairings, A' != 0, aggregated Schnorr) are the follow-up.
+
+## Notes & Decisions
+
+- The titan facade commits in NewFieldProver/NewGroupProver together with the point; the
+  meta-protocol only learns its points after the sum-checks, so step 2 is required, not optional.
+- The L_k residual claims of SC3 are folded into SC4 as a third term (theta^2), instead of a
+  separate log n sum-check. SC4 is then a 3-term MultiClaim.
+- K must be a power of two and EVERY instance must satisfy the relation: zero padding does not,
+  once G0 != 0. Padding with valid dummy instances is the caller's job.
+- The group PCS needs an even number of variables, so log c + log K must be even.
+
+---
+
 # Plan: Titan multilinear PCS — step 5 (folding: closing the evaluation claim)
 
 > ## ⏸️ PAUSED — resume here
