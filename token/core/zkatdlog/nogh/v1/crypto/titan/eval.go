@@ -506,7 +506,7 @@ func VerifyEvalGroup(curve *mathlib.Curve, c *Commitment, alpha []fr.Element, si
 // alpha[m/2:], and the difference is a layout difference, not a disagreement.
 //
 // Row j of the matrix is the contiguous block f[j*cols : (j+1)*cols] (see
-// CommitField), so the row index occupies the HIGH bits of the flat table index.
+// commitField), so the row index occupies the HIGH bits of the flat table index.
 // In the little-endian convention this package and crypto/sumcheck share, table
 // entry i holds f at the bit decomposition of i with b_k the k-th bit, so the high
 // bits are the LAST variables. Rows therefore correspond to alpha[m/2:] and

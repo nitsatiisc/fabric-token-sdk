@@ -105,7 +105,7 @@ func TestGroupPCSRoundTrip(t *testing.T) {
 }
 
 // TestPCSProverAlwaysFolds is the first of the two guarantees, and the reason this
-// facade exists rather than callers wiring CommitField themselves.
+// facade exists rather than callers wiring the commit stages themselves.
 //
 // Without a fold proof, VerifyEval only *reduces* the claim: leg 1 shows the sum
 // follows from a residual opening, leg 2 opens SigmaPartial against the generators,
@@ -151,12 +151,19 @@ func TestPCSProverAlwaysFolds(t *testing.T) {
 }
 
 // TestPCSVerifierRejectsUnfoldedCommitment is the second guarantee, from the other
-// direction: even if a caller obtains an unfolded commitment elsewhere -- from
-// CommitField directly, or from an older serialized form -- this API must refuse to
-// build a verifier over it rather than report 1 for proofs that establish nothing.
+// direction: a Commitment whose Cosets is nil must be refused rather than verified
+// against.
 //
-// This is the case the 0/1 return cannot express, which is why it is caught at
-// construction instead.
+// Unexporting the commit stages removed the ability to *construct* one of these from
+// outside the package, so the remaining sources are external: a commitment
+// deserialized from the wire, or one produced by an older version of this package.
+// Neither is hypothetical, and neither is something the facade can rule out by
+// construction -- hence a check. The fixture below reaches for the unexported stage
+// only because a test can; that is the shortest way to build the shape an external
+// caller might hand us.
+//
+// It is also the case the 0/1 return cannot express, which is why it is caught at
+// construction rather than reported as a failed verification.
 func TestPCSVerifierRejectsUnfoldedCommitment(t *testing.T) {
 	t.Parallel()
 
@@ -166,9 +173,10 @@ func TestPCSVerifierRejectsUnfoldedCommitment(t *testing.T) {
 		const m = 8
 		setup, st, w := newFieldPCS(t, m)
 
-		// Commit WITHOUT folding, the way a caller bypassing this facade would.
+		// Commit WITHOUT folding, to produce the shape a stale or foreign
+		// commitment would have.
 		_, numCols := matrixShape(m)
-		com, _, err := CommitField(w.Poly, testGenerators(t, numCols), setup.dom, 0)
+		com, _, err := commitField(w.Poly, testGenerators(t, numCols), setup.dom, 0)
 		require.NoError(t, err)
 		require.Nil(t, com.Cosets, "this fixture is meant to be unfolded")
 
@@ -183,7 +191,7 @@ func TestPCSVerifierRejectsUnfoldedCommitment(t *testing.T) {
 
 		setup, st, w := newGroupPCS(t, 8)
 
-		com, _, err := CommitGroup(w.Poly, setup.dom, 0)
+		com, _, err := commitGroup(w.Poly, setup.dom, 0)
 		require.NoError(t, err)
 		require.Nil(t, com.Cosets)
 

@@ -54,7 +54,7 @@ import (
 // coset-wise leaves (the Rust reference's Merkle config is Leaf = Vec<G>), and the
 // leaf *shape* determines every root and every proof in the scheme. Fixing it now
 // at k = 0 (one point per leaf) costs nothing and means enabling k > 0 later does
-// not invalidate the format. See CommitGroup for the k parameter.
+// not invalidate the format. See commitGroup for the k parameter.
 
 // Domain separation prefixes, as in RFC 6962. Without these a leaf hash and an
 // internal node hash would be drawn from the same space; see the note above.

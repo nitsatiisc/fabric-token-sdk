@@ -110,7 +110,7 @@ func BenchmarkCommitField(b *testing.B) {
 		}
 		b.Run("m="+strconv.Itoa(m), func(b *testing.B) {
 			for b.Loop() {
-				if _, _, err := CommitField(poly, gens, dom, 0); err != nil {
+				if _, _, err := commitField(poly, gens, dom, 0); err != nil {
 					b.Fatal(err)
 				}
 			}

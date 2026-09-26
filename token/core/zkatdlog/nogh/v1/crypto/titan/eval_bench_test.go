@@ -44,7 +44,7 @@ func benchEvalSetup(b *testing.B, m int) (*mathlib.Curve, *Commitment, *FieldOpe
 	if err != nil {
 		b.Fatal(err)
 	}
-	c, hint, err := CommitField(f, gens, dom, 0)
+	c, hint, err := commitField(f, gens, dom, 0)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -114,7 +114,7 @@ func BenchmarkEvalGroup(b *testing.B) {
 			if err != nil {
 				b.Fatal(err)
 			}
-			_, hint, err := CommitGroup(G, dom, 0)
+			_, hint, err := commitGroup(G, dom, 0)
 			if err != nil {
 				b.Fatal(err)
 			}

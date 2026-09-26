@@ -31,11 +31,16 @@ import (
 //     size is not absorbed into the transcript, so the mistake is pure cost. See
 //     fieldRowVars, and TestPCSSetupSizesTheDomainByTheFoldedHalf, which is the
 //     only thing that catches it.
-//  2. Folding must be switched ON. CommitField/CommitGroup produce a commitment
-//     whose Cosets is nil, and the verifier then *reduces* the claim without
-//     closing it: the two legs prove an evaluation of a polynomial nobody
-//     committed. Only the WithFold constructors are reachable from here, so a
-//     caller cannot obtain an unsound prover from this API at all.
+//  2. A commitment must carry its coset oracle. There is no such thing as a
+//     useful unfolded commitment: without the oracle the verifier *reduces* the
+//     claim without closing it, so the two legs prove an evaluation of a
+//     polynomial nobody committed. The commit stages that produce such a
+//     commitment (commitField/commitGroup) are unexported for that reason, so
+//     "folding off" is not a mode a caller can select -- it is an intermediate
+//     state inside CommitFieldWithFold. What remains for this facade to check is
+//     the case it cannot rule out by construction: a Commitment that arrives from
+//     elsewhere, deserialized or built by an older version, whose Cosets is nil.
+//     NewFieldVerifier refuses it.
 //  3. alpha has m coordinates, not Commitment.NumVars, which counts only the row
 //     half of the field matrix. A caller who reads NumVars and sizes alpha from
 //     it gets an error on the field path and a wrong answer on neither -- but the

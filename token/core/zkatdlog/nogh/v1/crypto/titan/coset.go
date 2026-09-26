@@ -177,7 +177,7 @@ type CosetOpeningHint struct {
 // CommitCosets builds and Merkle-commits the coset-wise oracle for G.
 //
 // This is the oracle the folding phase queries, and it is committed separately
-// from the flat codeword CommitGroup produces because the two hold different
+// from the flat codeword commitGroup produces because the two hold different
 // values -- see EncodeCosets.
 //
 // The returned hint is prover state and must not be given to a verifier.

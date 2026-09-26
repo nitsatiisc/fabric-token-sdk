@@ -19,7 +19,7 @@ import (
 )
 
 // testGenerators returns n distinct generators. These stand in for a real setup;
-// CommitField takes them from the caller precisely because their provenance is a
+// commitField takes them from the caller precisely because their provenance is a
 // trust question this package does not answer.
 func testGenerators(t *testing.T, n int) []bls12381.G1Affine {
 	t.Helper()
@@ -44,7 +44,7 @@ func TestCommitGroupRoundTrip(t *testing.T) {
 				require.NoError(t, err)
 				G := randomGroupPoly(t, m)
 
-				c, hint, err := CommitGroup(G, dom, k)
+				c, hint, err := commitGroup(G, dom, k)
 				require.NoError(t, err, "m=%d d=%d k=%d", m, d, k)
 
 				require.Len(t, c.Root, DigestSize)
@@ -77,7 +77,7 @@ func TestCommitGroupLeavesArePartitionOfCodeword(t *testing.T) {
 
 	var reference []bls12381.G1Affine
 	for _, k := range []int{0, 1, 2, 3} {
-		_, hint, err := CommitGroup(G, dom, k)
+		_, hint, err := commitGroup(G, dom, k)
 		require.NoError(t, err)
 
 		if reference == nil {
@@ -97,7 +97,7 @@ func TestCommitGroupLeavesArePartitionOfCodeword(t *testing.T) {
 
 // TestCommitFieldTierOneMatchesDirectMSM is the decisive tier-1 check: the group
 // multilinear must be exactly the per-row Pedersen commitment, computed here
-// without CommitField.
+// without commitField.
 func TestCommitFieldTierOneMatchesDirectMSM(t *testing.T) {
 	for m := 1; m <= 8; m++ {
 		f := randomFieldPoly(t, m)
@@ -108,7 +108,7 @@ func TestCommitFieldTierOneMatchesDirectMSM(t *testing.T) {
 		dom, err := NewDomain(maxInt(logOf(rows), 1) + 1)
 		require.NoError(t, err)
 
-		_, hint, err := CommitField(f, gens, dom, 0)
+		_, hint, err := commitField(f, gens, dom, 0)
 		require.NoError(t, err)
 		require.Len(t, hint.G, rows)
 		assert.Equal(t, rows, hint.NumRows)
@@ -132,7 +132,7 @@ func TestCommitFieldTierOneMatchesDirectMSM(t *testing.T) {
 	}
 }
 
-// TestCommitFieldGroupPolyIsTheEvaluationTable pins the claim in the CommitGroup
+// TestCommitFieldGroupPolyIsTheEvaluationTable pins the claim in the commitGroup
 // docs that no interpolation step is needed: entry j of the table is already the
 // value at the bit decomposition of j, so EvaluatePoint on a boolean point must
 // return the row commitment.
@@ -144,7 +144,7 @@ func TestCommitFieldGroupPolyIsTheEvaluationTable(t *testing.T) {
 	dom, err := NewDomain(logOf(rows) + 1)
 	require.NoError(t, err)
 
-	_, hint, err := CommitField(f, gens, dom, 0)
+	_, hint, err := commitField(f, gens, dom, 0)
 	require.NoError(t, err)
 
 	numVars := logOf(rows)
@@ -183,9 +183,9 @@ func TestCommitFieldIsDeterministic(t *testing.T) {
 	dom, err := NewDomain(5)
 	require.NoError(t, err)
 
-	a, _, err := CommitField(f, gens, dom, 0)
+	a, _, err := commitField(f, gens, dom, 0)
 	require.NoError(t, err)
-	b, _, err := CommitField(f, gens, dom, 0)
+	b, _, err := commitField(f, gens, dom, 0)
 	require.NoError(t, err)
 	assert.Equal(t, a.Root, b.Root)
 }
@@ -197,7 +197,7 @@ func TestCommitFieldDistinctPolysGiveDistinctRoots(t *testing.T) {
 	dom, err := NewDomain(5)
 	require.NoError(t, err)
 
-	a, _, err := CommitField(f, gens, dom, 0)
+	a, _, err := commitField(f, gens, dom, 0)
 	require.NoError(t, err)
 
 	g := make(sumcheck.FieldPoly, len(f))
@@ -206,7 +206,7 @@ func TestCommitFieldDistinctPolysGiveDistinctRoots(t *testing.T) {
 	one.SetOne()
 	g[len(g)/3].Add(&g[len(g)/3], &one)
 
-	b, _, err := CommitField(g, gens, dom, 0)
+	b, _, err := commitField(g, gens, dom, 0)
 	require.NoError(t, err)
 	assert.NotEqual(t, a.Root, b.Root, "changing a coefficient must change the root")
 }
@@ -219,11 +219,11 @@ func TestCommitFieldDifferentGeneratorsGiveDifferentRoots(t *testing.T) {
 	dom, err := NewDomain(5)
 	require.NoError(t, err)
 
-	a, _, err := CommitField(f, testGenerators(t, cols), dom, 0)
+	a, _, err := commitField(f, testGenerators(t, cols), dom, 0)
 	require.NoError(t, err)
 
 	other := testGenerators(t, cols+1)[1:]
-	b, _, err := CommitField(f, other, dom, 0)
+	b, _, err := commitField(f, other, dom, 0)
 	require.NoError(t, err)
 	assert.NotEqual(t, a.Root, b.Root)
 }
@@ -233,23 +233,23 @@ func TestCommitGroupValidation(t *testing.T) {
 	require.NoError(t, err)
 	G := randomGroupPoly(t, 3)
 
-	_, _, err = CommitGroup(G, nil, 0)
+	_, _, err = commitGroup(G, nil, 0)
 	assert.ErrorIs(t, err, ErrNilDomain)
 
-	_, _, err = CommitGroup(nil, dom, 0)
+	_, _, err = commitGroup(nil, dom, 0)
 	assert.ErrorIs(t, err, ErrNilPolynomial)
 
-	_, _, err = CommitGroup(G, dom, -1)
+	_, _, err = commitGroup(G, dom, -1)
 	assert.ErrorIs(t, err, ErrInvalidCosetDim)
 
 	// k larger than the codeword cannot split it.
-	_, _, err = CommitGroup(G, dom, 5)
+	_, _, err = commitGroup(G, dom, 5)
 	assert.ErrorIs(t, err, ErrInvalidCosetDim)
 
 	// Domain smaller than the polynomial is rejected by the encoder.
 	small, err := NewDomain(2)
 	require.NoError(t, err)
-	_, _, err = CommitGroup(G, small, 0)
+	_, _, err = commitGroup(G, small, 0)
 	assert.ErrorIs(t, err, ErrDomainTooSmall)
 }
 
@@ -259,24 +259,24 @@ func TestCommitFieldValidation(t *testing.T) {
 	f := randomFieldPoly(t, 6)
 	_, cols := matrixShape(6)
 
-	_, _, err = CommitField(nil, testGenerators(t, cols), dom, 0)
+	_, _, err = commitField(nil, testGenerators(t, cols), dom, 0)
 	assert.ErrorIs(t, err, ErrNilPolynomial)
 
-	_, _, err = CommitField(f, testGenerators(t, cols), nil, 0)
+	_, _, err = commitField(f, testGenerators(t, cols), nil, 0)
 	assert.ErrorIs(t, err, ErrNilDomain)
 
-	_, _, err = CommitField(f, testGenerators(t, cols-1), dom, 0)
+	_, _, err = commitField(f, testGenerators(t, cols-1), dom, 0)
 	assert.ErrorIs(t, err, ErrInsufficientGenerators)
 
 	ragged := make(sumcheck.FieldPoly, 7) // not a power of two
-	_, _, err = CommitField(ragged, testGenerators(t, cols), dom, 0)
+	_, _, err = commitField(ragged, testGenerators(t, cols), dom, 0)
 	assert.ErrorIs(t, err, ErrNotPowerOfTwo)
 }
 
 func TestOpenLeafValidation(t *testing.T) {
 	dom, err := NewDomain(5)
 	require.NoError(t, err)
-	_, hint, err := CommitGroup(randomGroupPoly(t, 3), dom, 0)
+	_, hint, err := commitGroup(randomGroupPoly(t, 3), dom, 0)
 	require.NoError(t, err)
 
 	_, _, err = hint.OpenLeaf(-1)

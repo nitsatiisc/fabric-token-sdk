@@ -49,7 +49,7 @@ func newEvalFixture(t *testing.T, m int) *evalFixture {
 	dom, err := NewDomain(rowVars + 1)
 	require.NoError(t, err)
 
-	c, hint, err := CommitField(f, gens, dom, 0)
+	c, hint, err := commitField(f, gens, dom, 0)
 	require.NoError(t, err)
 
 	curve := testCurve()
@@ -500,7 +500,7 @@ func TestEvalGroupRoundTrip(t *testing.T) {
 			G := randomGroupPoly(t, m)
 			dom, err := NewDomain(m + 1)
 			require.NoError(t, err)
-			c, hint, err := CommitGroup(G, dom, 0)
+			c, hint, err := commitGroup(G, dom, 0)
 			require.NoError(t, err)
 
 			alpha := randomPoint(t, m)
@@ -525,7 +525,7 @@ func TestEvalGroupNegatives(t *testing.T) {
 	G := randomGroupPoly(t, m)
 	dom, err := NewDomain(m + 1)
 	require.NoError(t, err)
-	c, hint, err := CommitGroup(G, dom, 0)
+	c, hint, err := commitGroup(G, dom, 0)
 	require.NoError(t, err)
 	alpha := randomPoint(t, m)
 	proof, sigma, err := hint.EvalGroup(curve, alpha)

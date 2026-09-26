@@ -234,8 +234,8 @@ here: **one commitment mechanism, two entry points**.
 | Tier 2 | Merkle root over the RS codeword | random oracle | `G` to a queryable oracle |
 
 ```
-CommitGroup(G)  = tier 2              a group polynomial commitment
-CommitField(f)  = tier 1 then tier 2  a field polynomial commitment
+CommitGroupWithFold(G)  = tier 2              a group polynomial commitment
+CommitFieldWithFold(f)  = tier 1 then tier 2  a field polynomial commitment
 ```
 
 Note the direction of tier 1: Pedersen does not commit *to* `G`, it **produces**
@@ -428,24 +428,35 @@ value — but it is bound into the transcript, so both sides must agree on it.
 
 ### 8.1 Commitment
 
-`CommitGroup` is the group polynomial commitment; `CommitField` is the field one and
-runs both tiers. Both return a `*Commitment` for the verifier and an opening hint
-that is **prover state and must not be sent**.
+`CommitGroupWithFold` is the group polynomial commitment; `CommitFieldWithFold` is the
+field one and runs both tiers. Both return a `*Commitment` for the verifier and an
+opening hint that is **prover state and must not be sent**.
+
+There is no unfolded variant in the public API, and that is deliberate. The stages that
+commit the flat codeword alone (`commitField`, `commitGroup`) are unexported: such a
+commitment lets a verifier *reduce* an evaluation claim without closing it, so its
+openings do not bind, and it is never what a caller wants. They exist only as the first
+half of the `WithFold` constructors. Most callers should not use either directly — the
+[PCS facade](#1312-the-pcs-facade) is the intended entry point.
 
 ```go
 dom, err := titan.NewDomain(11)                  // |L| = 2^11
 if err != nil {
     return errors.Wrap(err, "failed to build evaluation domain")
 }
+cfg, err := titan.DefaultFoldConfig(groupNumVars)
+if err != nil {
+    return errors.Wrap(err, "failed to choose a fold configuration")
+}
 
-// Group polynomial commitment: tier 2 only.
-c, hint, err := titan.CommitGroup(groupPoly, dom, 0)   // k = 0, one point per leaf
+// Group polynomial commitment: tier 2, with the coset oracle.
+c, hint, err := titan.CommitGroupWithFold(groupPoly, dom, 0, cfg)   // k = 0, one point per leaf
 if err != nil {
     return errors.Wrap(err, "failed to commit the group polynomial")
 }
 
 // Field polynomial commitment: tier 1 (Pedersen rows) then tier 2.
-c, fhint, err := titan.CommitField(fieldPoly, gens, dom, 0)
+c, fhint, err := titan.CommitFieldWithFold(fieldPoly, gens, dom, 0, cfg)
 if err != nil {
     return errors.Wrap(err, "failed to commit the field polynomial")
 }
@@ -467,7 +478,7 @@ if !titan.VerifyMerkleProof(c.Root, coset, proof) {
 because a root alone is ambiguous across parameter choices — a verifier must check
 the shape against what it expects rather than trusting the prover's.
 
-`gens` comes from the caller: `CommitField` performs no trusted setup, and generator
+`gens` comes from the caller: the field commitment performs no trusted setup, and generator
 provenance is a separate question this package does not answer. At least `cols`
 generators are required (`ErrInsufficientGenerators`).
 
@@ -613,7 +624,7 @@ Verification is linear in depth, as it should be:
 
 End-to-end field commitment, both tiers, rate-1/2 domain:
 
-| `m` | `CommitField` |
+| `m` | `commitField` |
 |---|---|
 | 10 | 8.24 ms |
 | 12 | 19.5 ms |
@@ -1027,7 +1038,7 @@ against a committed coset oracle.
 
 The distinction that remains is which constructor was used. A commitment from
 `CommitGroupWithFold`/`CommitFieldWithFold` carries a coset oracle, and its verifier
-*requires* a folding phase; a commitment from plain `CommitGroup`/`CommitField` has
+*requires* a folding phase; a commitment from the plain `commitGroup`/`commitField` stages has
 `Cosets == nil`, and for those a `nil` error still means the reduction holds, not that
 the oracle was checked. Both godocs say so at the function.
 
@@ -1474,10 +1485,14 @@ check is on drawability rather than on `m`: at `Q = 16`, `rowVars = 2` configure
     func ProveGroupEvalWithTranscript(tr *csp.Transcript, ...) (...)
     func VerifyGroupEvalWithTranscript(tr *csp.Transcript, ...) (...)
 
-`EvalProof` and `GroupEvalProof` each gain `Fold *FoldProof`. Commit with
-`CommitGroupWithFold`/`CommitFieldWithFold` to get a sound opening; the plain
-`CommitGroup`/`CommitField` still produce a commitment whose `Cosets` is nil, which
-reduces the claim without closing it and now says so in its godoc.
+`EvalProof` and `GroupEvalProof` each gain `Fold *FoldProof`. `CommitGroupWithFold` and
+`CommitFieldWithFold` are the only commitment constructors in the public API: the plain
+`commitGroup`/`commitField` stages, which produce a commitment whose `Cosets` is nil and
+therefore reduce a claim without closing it, are **unexported**. Folding is not a mode —
+there is no setting in which a caller wants it off, and every non-test caller of those
+stages was always the corresponding `WithFold` constructor. What survives as a runtime
+check is the case unexporting cannot reach: a nil-`Cosets` commitment arriving from the
+wire or from an older version, which the facade's verifier constructors refuse.
 
 ### 13.12 The PCS facade
 
@@ -1514,8 +1529,10 @@ alone), and `Prove() (*GroupEvalProof, bls12381.G1Affine, error)`.
    `2^(m - rowVars) = 2^(m/2)` — 16x at `m = 8`, **256x** at `m = 16` — and all of it is
    paid in the commit FFT that dominates `NewFieldProver`. Not "twice", which is the
    natural guess from the usual halving and was what this section originally claimed.
-2. **Folding must be switched on.** Only the `WithFold` constructors are reachable from
-   the facade, so a caller cannot obtain an unsound prover from it at all.
+2. **A commitment must carry its coset oracle.** Folding is not a mode that can be
+   switched off: the stages producing a nil-`Cosets` commitment are unexported, so the
+   only way to hold one is to receive it from outside (deserialized, or from an older
+   version). The facade's verifier constructors refuse exactly that.
 3. **`Alpha` has `m` coordinates, not `Commitment.NumVars`,** which counts only the row
    half of the field matrix.
 4. **Generators are converted once.** `NewGenerators` caches a mathlib conversion worth

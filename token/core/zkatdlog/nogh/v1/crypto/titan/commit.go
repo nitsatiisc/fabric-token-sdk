@@ -25,8 +25,8 @@ import (
 //
 // So:
 //
-//	CommitGroup(G)  = tier 2                 a group polynomial commitment
-//	CommitField(f)  = tier 1 then tier 2     a field polynomial commitment
+//	commitGroup(G)  = tier 2                 a group polynomial commitment
+//	commitField(f)  = tier 1 then tier 2     a field polynomial commitment
 //
 // Note the direction of tier 1: Pedersen does not commit *to* G, it *produces* G.
 // G is already a commitment to f, row by row, binding under discrete log. Tier 2
@@ -108,12 +108,17 @@ type FieldOpeningHint struct {
 	NumRows, NumCols int
 }
 
-// CommitGroup commits a group multilinear: encode it over the domain, group the
-// codeword into cosets of 2^k points, and Merkle-commit the cosets.
+// commitGroup encodes a group multilinear over the domain, groups the codeword into
+// cosets of 2^k points, and Merkle-commits them.
 //
-// This is the group polynomial commitment, and it is also tier 2 of the field
-// commitment. k = 0 gives one codeword point per leaf, which is the shape Eval
-// and EvalGroup use.
+// This is an internal STAGE, not a usable commitment on its own: it commits the flat
+// codeword, which is enough to *reduce* an evaluation claim but not to close it.
+// CommitGroupWithFold calls it and adds the coset oracle the consistency queries
+// need. It is unexported for that reason -- a commitment produced here has a nil
+// Cosets, and its openings do not bind (see CommitGroupWithFold, and section 13.3
+// of docs/crypto/titan.md for which check closes the gap).
+//
+// k = 0 gives one codeword point per leaf, which is what every caller passes.
 //
 // k > 0 groups the flat codeword into contiguous blocks. That is a storage
 // convention only -- see chunkIntoCosets -- and it is NOT the coset structure the
@@ -121,7 +126,7 @@ type FieldOpeningHint struct {
 // CommitCosets and EncodeCosets.
 //
 // The returned hint is prover state and must not be given to a verifier.
-func CommitGroup(G sumcheck.GroupPoly, dom *Domain, k int) (*Commitment, *GroupOpeningHint, error) {
+func commitGroup(G sumcheck.GroupPoly, dom *Domain, k int) (*Commitment, *GroupOpeningHint, error) {
 	if dom == nil {
 		return nil, nil, errors.WithMessage(ErrNilDomain, "cannot commit a group polynomial")
 	}
@@ -162,7 +167,7 @@ func CommitGroup(G sumcheck.GroupPoly, dom *Domain, k int) (*Commitment, *GroupO
 // oracle the folding phase queries, giving an opening that can be *closed* rather
 // than only reduced.
 //
-// CommitGroup alone commits the flat codeword. That is enough to reduce an
+// The commitGroup stage alone commits the flat codeword. That is enough to reduce an
 // evaluation claim, but not to close it: the folding phase's consistency queries
 // open cosets, and the cosets are a different object from the flat codeword (see
 // EncodeCosets). This constructor builds both, so Eval and EvalGroup can produce a
@@ -185,7 +190,7 @@ func CommitGroupWithFold(G sumcheck.GroupPoly, dom *Domain, k int, cfg FoldConfi
 		return nil, nil, err
 	}
 
-	c, hint, err := CommitGroup(G, dom, k)
+	c, hint, err := commitGroup(G, dom, k)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -203,7 +208,11 @@ func CommitGroupWithFold(G sumcheck.GroupPoly, dom *Domain, k int, cfg FoldConfi
 	return c, hint, nil
 }
 
-// CommitField commits a field multilinear through both tiers.
+// commitField commits a field multilinear through both tiers.
+//
+// Like commitGroup this is an internal STAGE whose result does not bind on its own;
+// CommitFieldWithFold calls it and adds the coset oracle. Unexported for the same
+// reason.
 //
 // Tier 1 reads f as a NumRows x NumCols matrix and Pedersen-commits each row
 // against gens, giving one group element per row. Those elements *are* the
@@ -212,11 +221,11 @@ func CommitGroupWithFold(G sumcheck.GroupPoly, dom *Domain, k int, cfg FoldConfi
 // bit decomposition of j, so there is no interpolation step to perform despite
 // what the word "interpolate" in the protocol description suggests.
 //
-// Tier 2 is then CommitGroup on G.
+// Tier 2 is then commitGroup on G.
 //
 // gens must hold at least NumCols generators; their provenance is the caller's
 // responsibility, as no trusted setup is performed here.
-func CommitField(f sumcheck.FieldPoly, gens []bls12381.G1Affine, dom *Domain, k int) (*Commitment, *FieldOpeningHint, error) {
+func commitField(f sumcheck.FieldPoly, gens []bls12381.G1Affine, dom *Domain, k int) (*Commitment, *FieldOpeningHint, error) {
 	if f == nil {
 		return nil, nil, errors.WithMessage(ErrNilPolynomial, "cannot commit a field polynomial")
 	}
@@ -247,7 +256,7 @@ func CommitField(f sumcheck.FieldPoly, gens []bls12381.G1Affine, dom *Domain, k 
 		G[j] = v
 	}
 
-	c, gh, err := CommitGroup(G, dom, k)
+	c, gh, err := commitGroup(G, dom, k)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -270,7 +279,7 @@ func CommitField(f sumcheck.FieldPoly, gens []bls12381.G1Affine, dom *Domain, k 
 // CommitGroupWithFold, and note that cfg's Ell is relative to G's variable count
 // (log2 of the row count), not f's.
 func CommitFieldWithFold(f sumcheck.FieldPoly, gens []bls12381.G1Affine, dom *Domain, k int, cfg FoldConfig) (*Commitment, *FieldOpeningHint, error) {
-	c, hint, err := CommitField(f, gens, dom, k)
+	c, hint, err := commitField(f, gens, dom, k)
 	if err != nil {
 		return nil, nil, err
 	}
