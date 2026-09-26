@@ -455,8 +455,17 @@ if err != nil {
     return errors.Wrap(err, "failed to commit the group polynomial")
 }
 
-// Field polynomial commitment: tier 1 (Pedersen rows) then tier 2.
+// Field polynomial commitment: tier 1 (Pedersen rows) then tier 2. This reads f as
+// a matrix at the balanced split, m1 = m/2.
 c, fhint, err := titan.CommitFieldWithFold(fieldPoly, gens, dom, 0, cfg)
+if err != nil {
+    return errors.Wrap(err, "failed to commit the field polynomial")
+}
+
+// To choose the split instead -- which is what makes sizes like m = 10 usable, and
+// what lets the two legs' costs be traded off -- use CommitFieldWithFoldAt. The
+// split is recorded in the commitment, so the verifier checks against it.
+c, fhint, err = titan.CommitFieldWithFoldAt(fieldPoly, gens, dom, 0, cfg, titan.Split{M: 10, M1: 4})
 if err != nil {
     return errors.Wrap(err, "failed to commit the field polynomial")
 }
@@ -673,11 +682,12 @@ so the Go verifier must be written from the paper rather than ported.
 | `coset_test.go` | the coset **definition** against an independent `EvaluatePoint` (6 configs); `⟨leaf, eq(r)⟩` equals the reduced codeword; two negatives pinning that the coset oracle is **not** a regrouping or a strided read of the flat codeword; `CommitCosets` round-trip and binding; validation |
 | `foldconfig_test.go` | `Q(λ=128, ρ=1/8) = 43` under capacity and 86 under Johnson; the `DefaultEll` size model; `Validate` over `ell ∈ [1, m/2]`, odd `m`, bad rate and bad query count; the **drawability floor** — `Queries ≤ NumCosets(m)`, so `DefaultFoldConfig(2)` is rejected and `m = 4` is the smallest default-configurable size (13.10) |
 | `queries_test.go` | determinism; dependence on the transcript; distinctness and range including `n=256, q=43`; domain coverage; exhaustion at `q = n`; validation (nil transcript, non-power-of-two `n`, `q > n`) |
-| `fold_test.go` | round-trip for `m ∈ {4,6,8,10}` × `ell ∈ 1..m/2`; the reduced polynomial against `foldFirstField` applied `ell` times; **a lying prover** whose fold runs over another polynomial; **a foreign fold with genuine openings** (the test that check 3 is load-bearing, with `verifyFoldRoundsOnly` asserting checks 1–2 pass); every query position corrupted in turn, including the last; 11 soundness negatives (tampered leaf/path, wrong index, swapped and permuted queries, tampered/replaced/truncated reduced poly, tampered and dropped round, dropped query); wrong claim; wrong `alpha`; short coset; end-to-end `Eval`/`EvalGroup` with folding at `m ∈ {8,12}` incl. anti-downgrade in both directions and the prover-chosen query count; the field path's two size constraints (`m ≡ 0 mod 4` **and** `m ≥ 8`), asserting on the *reason* for each rejection since both return `ErrInvalidFoldConfig`; the batched check 3 (per-query failures, per-query sensitivity of the combined equation, and the absorb-before-sample ordering that makes the combination sound without relying on `gamma` — see 13.7); validation |
+| `fold_test.go` | round-trip for `m ∈ {4,6,8,10}` × `ell ∈ 1..m/2`; the reduced polynomial against `foldFirstField` applied `ell` times; **a lying prover** whose fold runs over another polynomial; **a foreign fold with genuine openings** (the test that check 3 is load-bearing, with `verifyFoldRoundsOnly` asserting checks 1–2 pass); every query position corrupted in turn, including the last; 11 soundness negatives (tampered leaf/path, wrong index, swapped and permuted queries, tampered/replaced/truncated reduced poly, tampered and dropped round, dropped query); wrong claim; wrong `alpha`; short coset; end-to-end `Eval`/`EvalGroup` with folding at `m ∈ {8,12}` incl. anti-downgrade in both directions and the prover-chosen query count; the field path's two size constraints under the balanced split (`m ≡ 0 mod 4` **and** `m ≥ 8`), asserting on the *reason* for each rejection since at the `FoldConfig` level both return `ErrInvalidFoldConfig` — note these are checked against `DefaultFoldConfig(rowVars)` directly, so they are unaffected by the split becoming a parameter (13.13), which moves the parity rejection to `ErrInvalidMatrixSplit` only at the setup boundary; the batched check 3 (per-query failures, per-query sensitivity of the combined equation, and the absorb-before-sample ordering that makes the combination sound without relying on `gamma` — see 13.7); validation |
 | `fold_bench_test.go` | proof size in **real serialized bytes** vs `ell ∈ 1..6` at `m = 12`; prove and verify at `m ∈ {8,10,12}`, the measurement behind the 10× batching speedup in 13.6 |
-| `pcs_test.go` | the facade (13.12): round trip at `m ∈ {8,12,16}` (field) and `{4,6,8,10}` (group); the **two guarantees** — a prover always folds, a verifier refuses an unfolded commitment; wrong value, wrong point, and a foreign proof rejected on both paths; `Verify` vs `VerifyErr` separating misuse from rejection; arity errors incl. `Alpha` sized from the row half; the field path's size constraints at the API boundary; setup validation and nil receivers; the **domain-sizing rule** on both paths, which no functional test can see |
+| `pcs_test.go` | the facade (13.12): round trip at `m ∈ {8,12,16}` (field) and `{4,6,8,10}` (group); the **two guarantees** — a prover always folds, a verifier refuses an unfolded commitment; wrong value, wrong point, and a foreign proof rejected on both paths; `Verify` vs `VerifyErr` separating misuse from rejection; arity errors incl. `Alpha` sized from the row half; the field path's size constraints at the API boundary, each asserting the sentinel of the check that actually fires (`ErrInvalidMatrixSplit` for an odd row half, `ErrInvalidFoldConfig` for drawability) rather than one sentinel for both; setup validation and nil receivers; the **domain-sizing rule** on both paths, which no functional test can see; **asymmetric splits** at `m ∈ {10,14,18}` — sizes the balanced path rejects outright — with `sigma` checked against `FieldPoly.EvaluatePoint` since a round trip alone cannot see a mis-cut split (13.13) |
+| `split_test.go` | the shape invariant `Rows*Cols = 2^M` over every valid split to `M = 20`; the `Validate` / `ValidateForFold` separation, including the odd-row-half splits that must stay committable; degenerate splits and the legacy `M=1, M1=0` shape; `DefaultMatrixSplit` against `matrixShape` as a compatibility pin; and the balanced cut's foldability rule `m mod 4 ∈ {0,3}` (13.10) |
 
-Statement coverage is **91.0%** overall, race-clean. (It moved from 92.6% because the
+Statement coverage is **90.8%** overall, race-clean. (It moved from 92.6% because the
 folding phase added more error paths than the negatives exercise; the soundness-critical
 branches are covered, and section 13.7 records which mutations confirm that.)
 
@@ -1308,7 +1318,7 @@ verifier is now roughly 75× faster than its own prover rather than 15× slower.
 
 Batching does **not** remove the `Q·2^(m−ℓ)` plaintext term from the proof itself —
 `Reduced` is still sent in full. Recursing instead of sending it in plain is WHIR proper,
-and is what would take the verifier to polylog; see 13.13.
+and is what would take the verifier to polylog; see 13.14.
 
 ### 13.7 Mutation testing the folding phase
 
@@ -1423,14 +1433,33 @@ The same reasoning drives the **anti-downgrade check in both directions**: if
 unsound behaviour from a commitment that promised better; without the second, a fold
 proof appears to add assurance against a root that never committed to cosets.
 
-### 13.10 The field path needs `m ≡ 0 mod 4`, and `m ≥ 8`
+### 13.10 The field path's size constraints, and which are real
 
-Two independent constraints, which is why they are worth separating.
+Two independent constraints, which is why they are worth separating. Since step 6 made
+the matrix split a parameter (13.13), only the second is a property of the *scheme* —
+the first is a property of the **balanced split**, and moving the cut removes it.
 
 **Parity.** Folding attaches to leg 1, which runs over the row variables — so the
-constraint "`m` even" from the folding spec applies to `rowVars = m − m/2`, not to `m`.
-That **excludes m = 6, 10**, where `rowVars` is odd. This surfaced as a
-`DefaultFoldConfig` rejection at m = 6 that looked like a test bug and is not.
+constraint "`m` even" from the folding spec applies to `rowVars = M − M1`, not to `m`.
+Under the balanced split `M1 = m/2` that makes the foldable sizes exactly
+`m ≡ 0 or 3 (mod 4)`:
+
+| `m mod 4` | `rowVars = m − m/2` | foldable? |
+|---|---|---|
+| 0 | `m/2`, even | yes — 4, 8, 12, … |
+| 3 | `(m+1)/2`, even | yes — 3, 7, 11, … |
+| 1 | `(m+1)/2`, odd | no — 5, 9, 13, … |
+| 2 | `m/2`, odd | no — 6, 10, 14, … |
+
+So the familiar "`m` must be a multiple of 4" is only half the rule, and the odd sizes
+3, 7, 11 were never blocked by parity at all — they are blocked by drawability below.
+An assertion written while adding `split_test.go` claimed "foldable iff `m % 4 == 0`"
+and failed at `m = 3`; the two constraints are easy to conflate because on the sizes
+anyone actually uses they coincide.
+
+With the split free, the condition becomes one on `M1` rather than on `m`, and every
+`m > 2` has a foldable cut: `m = 10` at `M1 = 4` has a row half of 6, and `m = 18` at
+`M1 = 8` (the Rust reference's own value) has 10.
 
 **Drawability.** The `Q` consistency queries are *distinct* indices into the folded
 domain, which holds `2^(rowVars − ℓ + logRate)` cosets. At m = 4, `rowVars = 2` gives 16
@@ -1478,6 +1507,7 @@ check is on drawability rather than on `m`: at `Q = 16`, `rowVars = 2` configure
 
     func CommitGroupWithFold(G sumcheck.GroupPoly, dom *Domain, k int, cfg FoldConfig) (*Commitment, *GroupOpeningHint, error)
     func CommitFieldWithFold(f sumcheck.FieldPoly, gens []bls12381.G1Affine, dom *Domain, k int, cfg FoldConfig) (*Commitment, *FieldOpeningHint, error)
+    func CommitFieldWithFoldAt(f sumcheck.FieldPoly, gens []bls12381.G1Affine, dom *Domain, k int, cfg FoldConfig, split Split) (*Commitment, *FieldOpeningHint, error)
 
     func EncodeGroupOracleAt(p sumcheck.GroupPoly, dom *Domain, i int) (bls12381.G1Affine, error)
     func VerifyBatch(root []byte, leaves [][]bls12381.G1Affine, proof *BatchProof) bool
@@ -1501,9 +1531,11 @@ witness, prover, verifier. It adds **no cryptography** — every line delegates 
 primitives above — and exists because assembling them correctly takes four decisions
 whose failures are silent.
 
-    type FieldSetup struct { /* numVars, fold, gens, dom, curve */ }
+    type FieldSetup struct { /* numVars, split, fold, gens, dom, curve */ }
     func NewFieldSetup(numVars int, gens []bls12381.G1Affine, curve *mathlib.Curve, cfg FoldConfig) (*FieldSetup, error)
+    func NewFieldSetupWithSplit(split Split, gens []bls12381.G1Affine, curve *mathlib.Curve, cfg FoldConfig) (*FieldSetup, error)
     func (s *FieldSetup) NumVars() int
+    func (s *FieldSetup) Split() Split
     func (s *FieldSetup) FoldConfig() FoldConfig
 
     type FieldStatement struct { Alpha []fr.Element }
@@ -1588,7 +1620,69 @@ cost that every functional test is blind to needs a structural assertion, so
 latter so a "fix" that unifies the two paths fails too. A benchmark would have measured
 the regression but only a human reading the numbers would have noticed it.
 
-### 13.13 What is still open
+### 13.13 The outer matrix split as a parameter
+
+The field construction reads `f` as a `2^RowVars x 2^M1` matrix. `M1` — the number of
+**column** variables — decides how the work divides between the two legs:
+
+| | smaller `M1` | larger `M1` |
+|---|---|---|
+| leg 2 (CSP, linear) | cheaper — fewer variables, shorter row MSMs | dearer |
+| generators needed | `2^M1`, fewer | more |
+| leg 1 / domain | larger row half, so a bigger FFT and Merkle tree | smaller |
+
+It was hardcoded to `m/2` until step 6. That is one point on the curve, and the Rust
+reference treats it as a tuned free parameter, shipping asymmetric values per size
+(`m=18 → M1=8`, `m=22 → M1=9`, `m=26 → M1=11`).
+
+    type Split struct { M, M1 int }
+    func DefaultMatrixSplit(m int) Split        // the balanced cut, M1 = m/2
+    func (s Split) RowVars() int                // M - M1: what the fold runs over
+    func (s Split) ColVars() int                // M1
+    func (s Split) Rows() int                   // 2^RowVars
+    func (s Split) Cols() int                   // 2^M1, the generator count
+    func (s Split) Validate() error             // commit-time contract
+    func (s Split) ValidateForFold() error      // Validate + an EVEN row half
+
+**Two contracts, deliberately.** `Validate` is what committing needs: the halves must
+multiply back to `2^M`. `ValidateForFold` adds the even-row-half rule, because the coset
+layout halves the row half exactly. These belong to different phases — `commitFieldAt`
+calls the first, `CommitFieldWithFoldAt` the second — and collapsing them is a real
+hazard, not a hypothetical one: a draft of `Split` put the fold rule in `Validate` and
+broke every odd-`m` and `m = 2` test in the package at once, because those sizes commit
+and open perfectly well through the non-folding stages.
+
+**The split is on the wire.** `Commitment.ColVars` carries `M1`. This closes the
+ambiguity `checkShape` used to document: `NumVars` is `log2` of the *row* count, so it
+pins down `RowVars` and nothing else, and every row count is consistent with many `M1`.
+Before the field existed the verifier had to take the total variable count from `alpha`
+and divide it at the balanced cut, and could not detect a prover that had cut elsewhere.
+`ColVars == 0` means "not stated" — a group commitment, or a field commitment from
+before the field — and falls back to the balanced split, so older commitments verify
+exactly as they did.
+
+**Why a round trip is nearly worthless as the test here.** `eq` factorizes over *any*
+split, so a prover and verifier that both divide `alpha` at the wrong point produce a
+proof that verifies against itself perfectly — for a different polynomial than the one
+committed. `Verify() == 1` cannot see it. `TestFieldPCSSplitMakesOddSizesUsable`
+therefore checks `sigma` against `sumcheck.FieldPoly.EvaluatePoint`, the package's own
+reference evaluator, which knows nothing about matrices. Mutating `splitAlphaAt` to swap
+the halves passes verification and fails only that assertion — confirming both that the
+test works and that the silent-failure mode is real.
+
+Six mutations were run against the threading, all caught: swapping the halves; the
+prover re-deriving the split instead of using the committed one; the verifier dividing
+`alpha` at the balanced cut; `checkShape` ignoring `ColVars`; the commitment omitting
+`ColVars`; and the facade dropping the setup's split when committing.
+
+**Not yet done.** `DefaultEll` and the drawability floor are still computed against
+`RowVars` without regard to how the split was chosen (13.10), and no benchmark has
+established whether `m/2` is optimal for *our* cost model. It will not match Rust's
+`m/2 − 2`: that reference also folds the generator oracle (its `l2`), which keeps a
+larger column half cheap, whereas here every column variable is full linear CSP cost.
+Revisit the default when leg 2 folding lands, not before.
+
+### 13.14 What is still open
 
 Deferred by design, unchanged from section 12.8: zero-knowledge; `Setup`; batched `Eval`
 at several points; serialization; and the `O(n^(1/4))` variant, which needs a second

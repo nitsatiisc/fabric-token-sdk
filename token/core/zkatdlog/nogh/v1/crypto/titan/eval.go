@@ -269,7 +269,21 @@ func (h *FieldOpeningHint) Eval(curve *mathlib.Curve, gens *Generators, alpha []
 		return nil, sigma, err
 	}
 
-	alphaCol, alphaRow := splitAlpha(alpha, m)
+	// Use the split the commitment was actually made with, not a fresh balanced one.
+	// Re-deriving it here would silently disagree with an asymmetric commitment: the
+	// row MSMs would have been taken at one cut and alpha divided at another, and the
+	// two legs would prove an evaluation of a polynomial nobody committed. A zero
+	// Split means the hint predates the field, in which case balanced is what it used.
+	split := h.Split
+	if split == (Split{}) {
+		split = DefaultMatrixSplit(m)
+	}
+	if split.M != m {
+		return nil, sigma, errors.Wrapf(ErrNumVarsMismatch,
+			"the commitment was made over a %d-variable split but alpha has %d coordinates", split.M, m)
+	}
+
+	alphaCol, alphaRow := splitAlphaAt(alpha, split)
 
 	// a = fold(rows, alphaRow): the eq(alphaRow,.) combination of the matrix rows.
 	// This is leg 2's witness, and sigmaPartial is its Pedersen commitment.
@@ -371,7 +385,10 @@ func VerifyEval(curve *mathlib.Curve, c *Commitment, gens *Generators, alpha []f
 		return nil, err
 	}
 
-	alphaCol, alphaRow := splitAlpha(alpha, m)
+	// Divide alpha at the split the COMMITMENT states, which is the same one
+	// checkShape derived numCols from. Using the balanced default here instead would
+	// let the generator prefix and the alpha halves come from different cuts.
+	alphaCol, alphaRow := splitAlphaAt(alpha, commitmentSplit(c, m))
 
 	// Leg 1: the row sum-check, asserting the sum is SigmaPartial.
 	rowEll := DefaultSplit(len(alphaRow))
@@ -518,7 +535,18 @@ func VerifyEvalGroup(curve *mathlib.Curve, c *Commitment, alpha []fr.Element, si
 // fails only when checked against an independently computed f(alpha), which is
 // why the tests do exactly that.
 func splitAlpha(alpha []fr.Element, m int) (alphaCol, alphaRow []fr.Element) {
-	return alpha[:m/2], alpha[m/2:]
+	return splitAlphaAt(alpha, DefaultMatrixSplit(m))
+}
+
+// splitAlphaAt is splitAlpha for a caller-chosen split.
+//
+// The cut is at s.M1, so alphaCol has the M1 column coordinates and alphaRow the
+// remaining RowVars. Both halves must come from the same Split as the matrix shape,
+// or the two legs describe different polynomials. foldRows catches a size mismatch
+// (it compares len(eqTable(alphaRow)) against the row count), but that is a defence
+// at the point of use rather than a guarantee, so pass one Split through both.
+func splitAlphaAt(alpha []fr.Element, s Split) (alphaCol, alphaRow []fr.Element) {
+	return alpha[:s.M1], alpha[s.M1:]
 }
 
 // checkShape verifies that a commitment is over the row half of an m-variable
@@ -542,19 +570,53 @@ func splitAlpha(alpha []fr.Element, m int) (alphaCol, alphaRow []fr.Element) {
 // misleading accept. What must not happen -- and does not -- is for the two sides
 // to silently disagree on the split, which the row-count check below rules out.
 //
-// Callers who need the column count on the wire should put it in the commitment;
-// that is a format change, noted rather than made here.
+// # The column count is now on the wire, and that closes the ambiguity above
+//
+// Commitment.ColVars carries M1, so a field commitment made by this version of the
+// package states its own split and the paragraph above describes only the fallback.
+// When ColVars is set, the split is taken from it and m is checked against BOTH
+// halves, which makes a prover/verifier disagreement about where the matrix was cut
+// an error instead of two legs silently proving different polynomials.
+//
+// ColVars == 0 means "not stated": a group commitment, or a field commitment from
+// before the field existed. Those fall back to the balanced split, which is what
+// they were made with, so they verify exactly as before.
 func checkShape(c *Commitment, m int) (numCols int, err error) {
 	if m < 1 {
 		return 0, errors.Wrapf(ErrNumVarsMismatch, "alpha must have at least one coordinate")
 	}
-	rows, cols := matrixShape(m)
+
+	split := DefaultMatrixSplit(m)
+	if c.ColVars != 0 {
+		split = Split{M: m, M1: c.ColVars}
+		if err := split.Validate(); err != nil {
+			return 0, errors.Wrapf(err, "the commitment states %d column variables for a %d-variable point", c.ColVars, m)
+		}
+	}
+
+	rows, cols := split.Rows(), split.Cols()
 	if c.NumVars < 0 || c.NumVars > 62 || rows != 1<<c.NumVars {
 		return 0, errors.Wrapf(ErrNumVarsMismatch,
-			"a %d-variable polynomial has %d rows, but the commitment is over 2^%d", m, rows, c.NumVars)
+			"a %d-variable polynomial split at %d has %d rows, but the commitment is over 2^%d",
+			m, split.M1, rows, c.NumVars)
 	}
 
 	return cols, nil
+}
+
+// commitmentSplit returns the matrix split a commitment states, for a point of m
+// coordinates.
+//
+// ColVars == 0 means the commitment does not state one -- a group commitment, or a
+// field commitment from before the field existed -- and the balanced split is what
+// such a commitment was made with. checkShape validates the result, so callers that
+// have already called it can use this without re-checking.
+func commitmentSplit(c *Commitment, m int) Split {
+	if c == nil || c.ColVars == 0 {
+		return DefaultMatrixSplit(m)
+	}
+
+	return Split{M: m, M1: c.ColVars}
 }
 
 // foldRows returns the eq(alphaRow, .) combination of the matrix rows, i.e. the

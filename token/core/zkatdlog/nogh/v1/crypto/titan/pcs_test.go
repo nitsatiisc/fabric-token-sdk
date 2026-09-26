@@ -7,6 +7,7 @@ SPDX-License-Identifier: Apache-2.0
 package titan
 
 import (
+	"fmt"
 	"testing"
 
 	bls12381 "github.com/consensys/gnark-crypto/ecc/bls12-381"
@@ -416,19 +417,45 @@ func TestPCSRejectsWrongArity(t *testing.T) {
 // a fold-configuration error several calls deeper -- or, worse, as a transcript
 // failure from inside proveFold after the commitment has already been built.
 //
-// Both are real constraints, not oversights, and they are independent:
+// Both are real constraints, not oversights, they are independent, and they are
+// reported by DIFFERENT checks -- which is why this test asserts a distinct sentinel
+// for each rather than one for both:
 //
-//   - m=6, 10: rowVars = m - m/2 is odd, and the fold needs an even count.
-//   - m=4: rowVars=2, whose folded domain holds 16 cosets, which cannot supply the
-//     default 43 distinct queries.
+//   - m=6, 10: rowVars = m - m/2 is odd under the balanced split, and the fold needs
+//     an even count. That is a property of the SPLIT, so it fails
+//     Split.ValidateForFold with ErrInvalidMatrixSplit.
+//   - m=4: the split is fine (rowVars=2, even), but that folded domain holds only 16
+//     cosets and cannot supply the default 43 distinct queries. That is a property of
+//     the CONFIGURATION, so it fails FoldConfig.Validate with ErrInvalidFoldConfig.
+//
+// Asserting the right sentinel per case is what keeps this test honest. An earlier
+// version asserted ErrInvalidFoldConfig for all three; it passed only because the
+// even-rowVars rule was checked inside the fold config, and it would have gone on
+// passing if one of the two constraints had silently stopped being enforced.
+//
+// Note that both restrictions come from the BALANCED split this constructor uses,
+// not from the scheme -- see TestFieldPCSSplitMakesOddSizesUsable.
 func TestFieldPCSRejectsUnsupportedNumVars(t *testing.T) {
 	t.Parallel()
 
-	for _, m := range []int{4, 6, 10} {
+	// Odd row half: rejected as a split.
+	for _, m := range []int{6, 10} {
+		_, numCols := matrixShape(m)
+		_, err := NewFieldSetup(m, testGenerators(t, numCols), testCurve(), FoldConfig{})
+		require.ErrorIs(t, err, ErrInvalidMatrixSplit,
+			"m=%d has an odd row half under the balanced split and must be rejected at setup", m)
+	}
+
+	// Even row half, but too few cosets to draw the default queries from: rejected as
+	// a configuration.
+	{
+		const m = 4
 		_, numCols := matrixShape(m)
 		_, err := NewFieldSetup(m, testGenerators(t, numCols), testCurve(), FoldConfig{})
 		require.ErrorIs(t, err, ErrInvalidFoldConfig,
-			"m=%d is not usable on the field path and must be rejected at setup", m)
+			"m=4 has a valid split but cannot supply the default query count")
+		require.NotErrorIs(t, err, ErrInvalidMatrixSplit,
+			"m=4's split is legal; blaming the split would point at the wrong parameter")
 	}
 
 	// The group path folds all m variables rather than the row half, so it needs only
@@ -583,5 +610,82 @@ func TestPCSSetupSizesTheDomainByTheFoldedHalf(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, m+s.FoldConfig().LogRate, s.dom.LogSize,
 			"m=%d: the group path has no matrix split, so its domain is sized by m", m)
+	}
+}
+
+// TestFieldPCSSplitMakesOddSizesUsable is the point of making the matrix split a
+// parameter: sizes the balanced split cannot serve become usable by moving the cut.
+//
+// The balanced split forces rowVars = m - m/2 to be even, i.e. m divisible by 4,
+// because the fold halves the row half exactly. That is a property of the *choice*
+// m1 = m/2, not of the scheme. With the cut free, the condition becomes "M - M1 is
+// even", which is satisfiable at every m > 2 -- so m = 10, 14 and 18, all rejected
+// outright by NewFieldSetup, prove and verify here.
+//
+// # Why this asserts sigma against an independent evaluator
+//
+// A round trip alone would be nearly worthless for this. eq factorizes over ANY
+// split, so a prover and verifier that both divide alpha at the wrong point produce
+// a proof that verifies against itself perfectly -- just for a different polynomial
+// than the one committed. That is the failure splitAlpha's godoc warns about, and it
+// is invisible to Verify() == 1. So sigma is checked against
+// sumcheck.FieldPoly.EvaluatePoint, the package's own reference evaluator, which
+// knows nothing about matrices or splits.
+func TestFieldPCSSplitMakesOddSizesUsable(t *testing.T) {
+	t.Parallel()
+
+	// Each of these m is rejected by NewFieldSetup's balanced split; each has an M1
+	// that leaves an even row half.
+	cases := []struct{ m, m1 int }{
+		{m: 10, m1: 4},
+		{m: 10, m1: 2},
+		{m: 14, m1: 6},
+		{m: 18, m1: 8}, // the size the Rust reference's own config table starts at
+	}
+
+	for _, c := range cases {
+		t.Run(fmt.Sprintf("m=%d/m1=%d", c.m, c.m1), func(t *testing.T) {
+			t.Parallel()
+
+			split := Split{M: c.m, M1: c.m1}
+			require.NoError(t, split.ValidateForFold(),
+				"m=%d M1=%d should be a legal split", c.m, c.m1)
+
+			// The premise: the balanced constructor cannot serve this size at all.
+			_, err := NewFieldSetup(c.m, testGenerators(t, 1<<(c.m/2)), testCurve(), FoldConfig{})
+			require.Error(t, err, "m=%d must be unusable under the balanced split, or this test proves nothing", c.m)
+
+			setup, err := NewFieldSetupWithSplit(split, testGenerators(t, split.Cols()), testCurve(), FoldConfig{})
+			require.NoError(t, err)
+			require.Equal(t, split, setup.Split())
+
+			st := FieldStatement{Alpha: randomPoint(t, c.m)}
+			w := FieldWitness{Poly: randomFieldPoly(t, c.m)}
+
+			p, err := NewFieldProver(setup, st, w)
+			require.NoError(t, err)
+
+			// The split must reach the wire, or a verifier holding a different setup
+			// could not detect the disagreement.
+			require.Equal(t, c.m1, p.Commitment().ColVars,
+				"the commitment must state the column half it was made with")
+			require.Equal(t, split.RowVars(), p.Commitment().NumVars,
+				"the commitment is over the row half")
+
+			proof, sigma, err := p.Prove()
+			require.NoError(t, err)
+
+			// The load-bearing assertion: sigma is f(alpha) by an independent route.
+			want, err := w.Poly.EvaluatePoint(st.Alpha)
+			require.NoError(t, err)
+			require.True(t, want.Equal(&sigma),
+				"m=%d M1=%d: sigma is self-consistent but is not f(alpha) -- the halves are cut in the wrong place",
+				c.m, c.m1)
+
+			v, err := NewFieldVerifier(setup, st, p.Commitment())
+			require.NoError(t, err)
+			require.Equal(t, 1, v.Verify(proof, sigma))
+			require.NoError(t, v.VerifyErr(proof, sigma))
+		})
 	}
 }

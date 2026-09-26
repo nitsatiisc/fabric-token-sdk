@@ -380,21 +380,31 @@ func TestEvalValidation(t *testing.T) {
 		require.ErrorIs(t, err, ErrNilProof)
 	})
 
-	t.Run("alpha one shorter is rejected, though not by the shape check", func(t *testing.T) {
-		// fx.m = 4 has 4 rows, and so does m = 3 -- the ambiguity checkShape
-		// documents. So a 3-coordinate alpha passes the shape check and is caught
-		// downstream instead, by the row leg: the split differs, so the challenges
-		// and round messages no longer line up. Rejected either way, but asserting
-		// ErrNumVarsMismatch here would be asserting the wrong mechanism.
+	t.Run("alpha one shorter is rejected by the shape check", func(t *testing.T) {
+		// fx.m = 4 has 4 rows, and so does m = 3 under the BALANCED split -- the
+		// ambiguity checkShape used to document. It no longer applies: the commitment
+		// states its column half in ColVars, so m is checked against both halves
+		// rather than against the row count alone. At m = 3 with the commitment's
+		// M1 = 2 the row half is 1 variable, i.e. 2 rows, which does not match the
+		// 4 the commitment is over.
+		//
+		// Before ColVars was on the wire this case passed the shape check and was
+		// caught downstream by the row leg with ErrRoundCheckFailed, because the
+		// two sides split alpha differently and the round messages stopped lining
+		// up. Rejected either way; the point of the wire field is that it is now
+		// rejected for the right reason, at the boundary, instead of surviving to
+		// look like a malformed proof.
 		_, err := VerifyEval(fx.curve, fx.c, fx.cg, fx.alpha[:fx.m-1], sigma, proof)
-		require.ErrorIs(t, err, ErrRoundCheckFailed)
+		require.ErrorIs(t, err, ErrNumVarsMismatch)
 	})
 
-	t.Run("alpha of a shape the commitment cannot have", func(t *testing.T) {
-		// Two shorter, which lands on a different row count and so is caught by
-		// the shape check itself.
+	t.Run("alpha shorter than the stated column half", func(t *testing.T) {
+		// Two shorter lands at m = 2 against a commitment stating M1 = 2, so the
+		// split has no row variables left at all. That is not a shape mismatch but
+		// an unusable split, and it is reported as one -- the column half must leave
+		// at least one variable on each side.
 		_, err := VerifyEval(fx.curve, fx.c, fx.cg, fx.alpha[:fx.m-2], sigma, proof)
-		require.ErrorIs(t, err, ErrNumVarsMismatch)
+		require.ErrorIs(t, err, ErrInvalidMatrixSplit)
 	})
 
 	t.Run("empty alpha", func(t *testing.T) {

@@ -619,35 +619,138 @@ it and let `checkShape` stop reasoning about ambiguity.
 
 **It should also remove the `m ≡ 0 mod 4` constraint** (§13.10). That rule exists
 only because `rowVars = m − m/2` must be even for the fold to attach; with `m1`
-chosen directly the caller picks an even `m1` and odd total `m` becomes usable —
-which is why Rust runs m=18 and m=26 happily. Verify this rather than assume it.
+chosen directly the caller picks `m1` so that `m − m1` is even, and odd total `m`
+becomes usable — which is why Rust runs m=18 and m=26 happily.
+
+**Verified by probe before implementing**, enumerating `m1` with `m − m1` even and a
+drawable default fold config:
+
+| m | usable `m1` today (forced `m/2`) | usable `m1` with the split free |
+|---|---|---|
+| 7 | — (rowVars 4 ✓, blocked by drawability) | 1, 3 |
+| 9 | — (rowVars 5, odd) | 1, 3, 5 |
+| 11 | — (rowVars 6 ✓, blocked by drawability) | 1, 3, 5, 7 |
+| 13 | — (rowVars 7, odd) | 1, 3, 5, 7, 9 |
+| 18 | — (rowVars 9, odd) | 2, 4, 6, 8, 10, 12, 14 |
+| 20 | 10 only | 2, 4, 6, 8, 10, 12, 14, 16 |
+
+So odd `m` becomes usable and m=18 gains seven choices where it currently has none.
+The constraint is an artifact of the hardcoded split, confirmed.
+
+**Correction to the "m odd" column, found while writing `split_test.go`.** The rows
+for m=7 and m=11 originally said they were blocked for being odd. They are not: under
+the balanced split `rowVars = m − m/2` is even whenever `m mod 4 ∈ {0, 3}`, so m=7
+(rowVars 4) and m=11 (rowVars 6) pass parity and are rejected by the *drawability*
+floor instead. The parity rule is `m mod 4 ∈ {0, 3}`, not `m mod 4 == 0`, and the two
+constraints coincide only on the sizes anyone uses. An assertion in `split_test.go`
+that claimed "foldable iff `m % 4 == 0`" failed at m=3 and is what caught this.
 
 ## Steps
 
-- [ ] 6.1 `matrixShape(m)` → `matrixShape(m, m1)`, or a `Split` type carrying
-      `{M, M1}` with `Rows()`/`Cols()`. Prefer the latter: it gives one place to
-      validate and prevents the two call sites drifting.
-- [ ] 6.2 **`splitAlpha` (`eval.go:520`) independently hardcodes `m/2`** and must take
-      the same split. This is the dangerous one: `eq` factorizes over *any* split, so a
-      mismatch between `splitAlpha` and `matrixShape` produces a proof that **verifies
-      against itself** for a different polynomial. The existing godoc already warns
-      about exactly this. Pin with a test that checks against an independently computed
-      `f(alpha)` at an asymmetric `m1`.
-- [ ] 6.3 Thread `m1` into `FieldSetup` (`pcs.go`): a config field with `m/2` default,
-      plus validation (`1 ≤ m1 < m`, `m1` even for the fold to attach, generator count
-      from the new `cols`).
-- [ ] 6.4 Put `m1` (or the column count) in `Commitment`, and simplify `checkShape`.
-      **Format change** — note it as such.
-- [ ] 6.5 Revisit `DefaultEll`/`DefaultFoldConfig`: `Ell` is relative to `m1` now, and
-      the drawability floor (§13.10) moves with it.
-- [ ] 6.6 Tests: round trip at asymmetric `m1`; the `splitAlpha` consistency test of
-      6.2; odd `m` now working; the Rust table above as shape vectors; `m1 = m/2`
-      unchanged from today (regression).
-- [ ] 6.7 Benchmark the `m1` sweep at fixed `m`, to see whether `m/2` is actually the
-      optimum for *our* cost model (no `l2`). If it is not, say so rather than keeping
-      the default on faith.
-- [ ] 6.8 Docs: §13.10 (the mod-4 rule, if it goes away), §8.1, the new §13.14, and
-      the `checkShape` godoc.
+- [x] **Done** 6.1 `Split` type in `split.go` carrying `{M, M1}` with
+      `RowVars()`/`ColVars()`/`Rows()`/`Cols()`, plus `DefaultMatrixSplit(m)` (named to
+      avoid the pre-existing `DefaultSplit` for the sum-check `ell`). `matrixShape(m)`
+      survives as a thin wrapper over the balanced default, so the call sites that do
+      not care about the split are unchanged.
+
+      **Two contracts, not one — this was the main design correction of the step.**
+      `Validate()` is the commit-time rule (halves multiply back to `2^M`);
+      `ValidateForFold()` adds the even-row-half rule the coset layout needs. The first
+      draft put the fold rule in `Validate` and **broke every odd-`m` and `m = 2` test
+      in the package at once**, because those sizes commit and open perfectly well
+      through the non-folding stages. Committing at an odd row half is well defined;
+      only folding is not.
+- [x] **Done** 6.2 **`splitAlpha` (`eval.go:520`) independently hardcodes `m/2`** and must take
+      the same split. **Probed before implementing, and the risk is lower than assumed:**
+      `foldRows` already cross-checks `len(eqTable(alphaRow))` against `numRows`
+      (`eval.go:570`) and returns `ErrNumVarsMismatch` on a divergence -- tried at
+      `m1 ∈ {2,3,5}` against an alpha cut at `m/2`, all three errored with a clear
+      message. So a mismatch is **caught, not silent**, contrary to what this plan first
+      claimed on the strength of `splitAlpha`'s godoc warning (that warning is about
+      getting the row/column halves the wrong way *round*, which is silent, not about
+      differing split *sizes*, which is not).
+
+      Still thread the split through both rather than rely on that guard: it is a
+      defence at the point of use, not a structural guarantee, and leg 1 has no
+      equivalent. Keep a test at an asymmetric `m1` checked against
+      `FieldPoly.EvaluatePoint` -- the package's own reference evaluator, not a
+      hand-rolled one (a hand-rolled evaluator folding `alpha[0]` first uses the wrong
+      variable convention and silently disagrees; that cost time in probing).
+
+      **Done as `splitAlphaAt(alpha, Split)`**, with `splitAlpha(alpha, m)` kept as the
+      balanced-default wrapper. Threaded on both sides: the prover uses the split stored
+      on `FieldOpeningHint`, the verifier the one the commitment states. The
+      `FieldPoly.EvaluatePoint` test is
+      `TestFieldPCSSplitMakesOddSizesUsable`, and mutating `splitAlphaAt` to swap the
+      halves **passes verification and fails only that assertion** — confirming the
+      silent-failure mode is real and that the round trip alone would not see it.
+- [x] **Done** 6.3 `FieldSetup` gains a `split` field and a `Split()` accessor.
+      Rather than change `NewFieldSetup`'s signature, added
+      **`NewFieldSetupWithSplit(split, gens, curve, cfg)`**, with `NewFieldSetup`
+      delegating at the balanced default — so every existing caller and test is
+      untouched. Validation is `ValidateForFold` plus the generator count from
+      `split.Cols()`.
+
+      This moved a sentinel: at the setup boundary an odd row half is now
+      `ErrInvalidMatrixSplit` (a property of the split) while drawability stays
+      `ErrInvalidFoldConfig` (a property of the config).
+      `TestFieldPCSRejectsUnsupportedNumVars` asserted one sentinel for both and was
+      split accordingly — it passed before only because the parity rule lived inside
+      the fold config, and would have kept passing if either constraint had stopped
+      being enforced.
+- [x] **Done** 6.4 `Commitment.ColVars` carries `M1`. **This is a format change.**
+      `checkShape` now takes the split from it and checks `m` against *both* halves, so
+      a prover and verifier disagreeing about where the matrix was cut is an error
+      rather than two legs silently proving different polynomials.
+
+      `ColVars == 0` means "not stated" — a group commitment, or a field commitment
+      predating the field — and falls back to the balanced split, so older commitments
+      verify exactly as before. `FieldOpeningHint.Split` is the prover-side counterpart,
+      so the opening uses the cut the commitment was made with.
+
+      Two `TestEvalValidation` subtests changed *behaviour* here, in the intended
+      direction: with `m = 4, M1 = 2`, a 3-coordinate alpha is now caught by the shape
+      check (`ErrNumVarsMismatch`) instead of surviving to fail the row leg as
+      `ErrRoundCheckFailed`, and a 2-coordinate alpha is caught as
+      `ErrInvalidMatrixSplit`. Both were rejected before; they are now rejected at the
+      boundary for the right reason. The ambiguity the old `checkShape` godoc documented
+      is gone.
+- [ ] 6.5 **Still open.** Revisit `DefaultEll`/`DefaultFoldConfig`: both are computed
+      against `RowVars` and take no account of how the split was chosen, and the
+      drawability floor (§13.10) moves with the cut. Nothing is *wrong* today — a
+      smaller `M1` gives a larger row half and therefore more cosets, so moving the cut
+      can only relax the floor, never tighten it past what `FoldConfig.Validate` already
+      checks. So this is a tuning gap, not a soundness gap, which is why it is left
+      rather than rushed.
+- [x] **Done** 6.6 `split_test.go` (new): the shape invariant `Rows*Cols = 2^M` over
+      every valid split to `M = 20`; the `Validate`/`ValidateForFold` separation
+      including the odd-row-half splits that must stay committable; degenerate splits
+      and the legacy `M=1, M1=0` shape; `DefaultMatrixSplit` pinned against
+      `matrixShape` as the compatibility regression; and the balanced cut's foldability
+      rule.
+
+      `pcs_test.go` gains `TestFieldPCSSplitMakesOddSizesUsable`, covering
+      `m ∈ {10, 14, 18}` at asymmetric `M1` — each first asserted to be **unusable**
+      under `NewFieldSetup`, so the test cannot pass vacuously — with `sigma` checked
+      against `FieldPoly.EvaluatePoint`, and `ColVars`/`NumVars` checked on the wire.
+
+      **Six mutations, all caught**: swap the halves in `splitAlphaAt`; prover
+      re-derives the split instead of using the committed one; verifier divides alpha at
+      the balanced cut; `checkShape` ignores `ColVars`; commitment omits `ColVars`;
+      facade drops the setup split when committing.
+- [ ] 6.7 **Still open.** Benchmark the `m1` sweep at fixed `m`, to see whether `m/2`
+      is actually the optimum for *our* cost model (no `l2`). If it is not, say so
+      rather than keeping the default on faith. The machinery to do this now exists —
+      `NewFieldSetupWithSplit` at several `M1` for one `m` is the whole experiment — so
+      this is measurement, not implementation.
+- [x] **Done** 6.8 Docs: §13.10 rewritten with the `m mod 4 ∈ {0,3}` table and the
+      correction above; §8.1 shows `CommitFieldWithFoldAt`; new **§13.13 "The outer
+      matrix split as a parameter"** (the cost trade-off table, the two contracts, the
+      wire format, why a round trip is a weak test here, the six mutations, and what is
+      still open); §13.14 renumbered from 13.13 with cross-references fixed; §13.11 and
+      §13.12 API blocks updated; the test table gains a `split_test.go` row; coverage
+      restated at 90.8%. `checkShape`'s godoc keeps the old ambiguity paragraph as
+      history and adds what the wire field now closes.
 
 ## Notes & Decisions — step 6
 
@@ -658,3 +761,13 @@ which is why Rust runs m=18 and m=26 happily. Verify this rather than assume it.
 - `domain_g1_size` is a Rust config field we derive instead (`rowVars + LogRate`).
   Leaving it derived is correct — §13.12's mutation finding showed an oversized domain
   is invisible to every functional test, so it should not be hand-settable.
+- **The default is unchanged and that is a compatibility guarantee, not just a
+  convenience.** Every commitment made before this step used `m/2`, so changing the
+  default would silently stop such commitments from verifying.
+  `TestDefaultMatrixSplitIsTheBalancedCut` pins it, and also pins
+  `DefaultMatrixSplit` against `matrixShape` so the two cannot drift.
+- **Verification after 6.1–6.4, 6.6, 6.8:** suite green (13.7s), race-clean (84.7s),
+  `gofmt` clean, `go vet` clean, whole-repo `go build ./...` clean, coverage **90.8%**
+  (from 91.0% — the new error paths in `Split.Validate` and `commitFieldAt` add
+  branches the negatives do not all exercise). `make lint` still cannot run here
+  (`golangci-lint` absent) and must not be claimed as passing.

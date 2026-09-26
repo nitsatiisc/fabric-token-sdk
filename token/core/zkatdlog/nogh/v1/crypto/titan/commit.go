@@ -61,6 +61,21 @@ type Commitment struct {
 	// NumLeaves is the leaf count of the tree, |L| / 2^K.
 	NumLeaves int
 
+	// ColVars is the number of COLUMN variables of the field polynomial, i.e. the
+	// M1 of the matrix split, or 0 for a group commitment (which has no matrix).
+	//
+	// It is on the wire because the split is a free parameter and NumVars does not
+	// determine it. NumVars is log2 of the ROW count, so it pins down RowVars and
+	// nothing else: a commitment with NumVars = 4 is consistent with every M1, and
+	// before this field existed checkShape had to take the total variable count
+	// from alpha and could not detect a prover and verifier disagreeing about where
+	// the matrix was cut. See checkShape, which now cross-checks against this.
+	//
+	// Group commitments leave it 0, which is also what an older field commitment
+	// deserializes to; checkShape treats 0 as "not stated" and falls back to the
+	// balanced split, so such a commitment still verifies exactly as it did.
+	ColVars int
+
 	// Cosets is the commitment to the coset-wise oracle the folding phase
 	// queries, or nil if the polynomial was committed without one.
 	//
@@ -106,6 +121,11 @@ type FieldOpeningHint struct {
 	Rows sumcheck.FieldPoly
 	// NumRows and NumCols are the matrix dimensions, with NumRows*NumCols = len(Rows).
 	NumRows, NumCols int
+	// Split is the matrix split these dimensions came from. It is retained so that
+	// the opening uses the same cut as the commitment: ProveEval needs the column
+	// half of alpha, and deriving the split a second time from len(Rows) would give
+	// the balanced default even when the commitment used something else.
+	Split Split
 }
 
 // commitGroup encodes a group multilinear over the domain, groups the codeword into
@@ -226,6 +246,31 @@ func CommitGroupWithFold(G sumcheck.GroupPoly, dom *Domain, k int, cfg FoldConfi
 // gens must hold at least NumCols generators; their provenance is the caller's
 // responsibility, as no trusted setup is performed here.
 func commitField(f sumcheck.FieldPoly, gens []bls12381.G1Affine, dom *Domain, k int) (*Commitment, *FieldOpeningHint, error) {
+	m, err := numVarsOf(len(f))
+	if err != nil {
+		// Defer the report to commitFieldAt, which handles a nil or ragged f with the
+		// right sentinel. A zero Split would otherwise fail validation first and
+		// blame the split for what is really the caller's polynomial.
+		return commitFieldAt(f, gens, dom, k, Split{})
+	}
+
+	return commitFieldAt(f, gens, dom, k, DefaultMatrixSplit(m))
+}
+
+// Compile-time note: DefaultMatrixSplit(0) is Split{0, 0}, which Validate rejects
+// as a non-positive variable count -- the same error len(f) == 1 produced before,
+// via a different route.
+
+// commitFieldAt is commitField over a caller-chosen matrix split.
+//
+// The split is an input rather than a function of len(f) because it is a free
+// parameter of the scheme: 2^M1 columns means leg 2 runs over M1 variables and the
+// row MSMs have length 2^M1, and the balanced choice is only a default. See Split.
+//
+// The split must be the same one the opening uses, or the two legs describe
+// different polynomials; it reaches the verifier through the commitment rather than
+// being re-derived, which is what keeps the two sides from drifting.
+func commitFieldAt(f sumcheck.FieldPoly, gens []bls12381.G1Affine, dom *Domain, k int, split Split) (*Commitment, *FieldOpeningHint, error) {
 	if f == nil {
 		return nil, nil, errors.WithMessage(ErrNilPolynomial, "cannot commit a field polynomial")
 	}
@@ -236,8 +281,15 @@ func commitField(f sumcheck.FieldPoly, gens []bls12381.G1Affine, dom *Domain, k 
 	if err != nil {
 		return nil, nil, err
 	}
+	if split.M != m {
+		return nil, nil, errors.Wrapf(ErrNumVarsMismatch,
+			"the split is over %d variables but the polynomial has %d", split.M, m)
+	}
+	if err := split.Validate(); err != nil {
+		return nil, nil, err
+	}
 
-	numRows, numCols := matrixShape(m)
+	numRows, numCols := split.Rows(), split.Cols()
 	if numRows*numCols != len(f) {
 		return nil, nil, errors.Wrapf(ErrNumVarsMismatch, "matrix shape %dx%d does not cover %d coefficients", numRows, numCols, len(f))
 	}
@@ -261,11 +313,14 @@ func commitField(f sumcheck.FieldPoly, gens []bls12381.G1Affine, dom *Domain, k 
 		return nil, nil, err
 	}
 
+	c.ColVars = split.ColVars()
+
 	hint := &FieldOpeningHint{
 		GroupOpeningHint: *gh,
 		Rows:             f,
 		NumRows:          numRows,
 		NumCols:          numCols,
+		Split:            split,
 	}
 
 	return c, hint, nil
@@ -279,7 +334,26 @@ func commitField(f sumcheck.FieldPoly, gens []bls12381.G1Affine, dom *Domain, k 
 // CommitGroupWithFold, and note that cfg's Ell is relative to G's variable count
 // (log2 of the row count), not f's.
 func CommitFieldWithFold(f sumcheck.FieldPoly, gens []bls12381.G1Affine, dom *Domain, k int, cfg FoldConfig) (*Commitment, *FieldOpeningHint, error) {
-	c, hint, err := commitField(f, gens, dom, k)
+	m, err := numVarsOf(len(f))
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return CommitFieldWithFoldAt(f, gens, dom, k, cfg, DefaultMatrixSplit(m))
+}
+
+// CommitFieldWithFoldAt is CommitFieldWithFold over a caller-chosen matrix split.
+//
+// The split must pass ValidateForFold, which is stricter than what committing alone
+// needs: the fold attaches to the row half and requires an even number of variables
+// there. A split that is legal to commit but not to fold is rejected here rather than
+// producing a commitment whose openings cannot be closed.
+func CommitFieldWithFoldAt(f sumcheck.FieldPoly, gens []bls12381.G1Affine, dom *Domain, k int, cfg FoldConfig, split Split) (*Commitment, *FieldOpeningHint, error) {
+	if err := split.ValidateForFold(); err != nil {
+		return nil, nil, err
+	}
+
+	c, hint, err := commitFieldAt(f, gens, dom, k, split)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -367,20 +441,17 @@ func chunkIntoCosets(codeword []bls12381.G1Affine, k int) ([][]bls12381.G1Affine
 	return leaves, nil
 }
 
-// matrixShape returns the row and column counts for the matrix form of a
+// matrixShape returns the row and column counts for the BALANCED matrix form of a
 // multilinear in m variables.
 //
-// For even m this is the square 2^(m/2) x 2^(m/2) split. For odd m = 2s+1 a square
-// split does not exist, so the extra variable goes to the *rows*: 2^(s+1) rows of
-// 2^s columns. Putting it on the rows rather than the columns keeps the row MSMs
-// shorter and gives the group multilinear one more variable, which is the cheaper
-// side to grow -- group operations dominate. The choice is arbitrary but must be
-// fixed, since prover and verifier have to agree on the shape.
+// This is DefaultMatrixSplit(m).Rows()/Cols(), kept as a helper because the balanced
+// split is the default everywhere and most call sites do not care that it is one
+// choice among several. Code that must honour a caller-chosen split takes a Split and
+// asks it directly -- see Split.Rows.
 func matrixShape(m int) (rows, cols int) {
-	cols = 1 << (m / 2)
-	rows = 1 << (m - m/2)
+	s := DefaultMatrixSplit(m)
 
-	return rows, cols
+	return s.Rows(), s.Cols()
 }
 
 // numVarsOf returns log2 of a power-of-two evaluation table length.

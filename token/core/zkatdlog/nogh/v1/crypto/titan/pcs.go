@@ -80,6 +80,7 @@ import (
 // once built, so it is safe for concurrent use.
 type FieldSetup struct {
 	numVars int
+	split   Split
 	fold    FoldConfig
 	gens    *Generators
 	dom     *Domain
@@ -97,13 +98,47 @@ type FieldSetup struct {
 // one matching this package's types.
 //
 // cfg is the folding configuration. Pass the zero FoldConfig to take
-// DefaultFoldConfig, which targets 128 bits under the capacity bound. Note the
-// field path additionally requires numVars to be divisible by 4, not merely even:
-// folding attaches to leg 1, which runs over rowVars = numVars - numVars/2, and
-// that must itself be even. numVars = 4, 8, 12 work; 6 and 10 do not, and are
-// rejected here rather than surfacing later as a confusing fold error.
+// DefaultFoldConfig, which targets 128 bits under the capacity bound.
+//
+// This constructor uses the BALANCED matrix split, which is what makes numVars
+// divisible by 4 a requirement rather than merely even: folding attaches to leg 1,
+// which runs over rowVars = numVars - numVars/2, and that must itself be even.
+// numVars = 4, 8, 12 work here; 6 and 10 do not, and are rejected rather than
+// surfacing later as a confusing fold error.
+//
+// That restriction is a property of the balanced split, not of the scheme. Use
+// NewFieldSetupWithSplit to choose the cut, which makes odd and
+// non-multiple-of-four sizes usable -- numVars = 10 at M1 = 4 has a row half of 6.
 func NewFieldSetup(numVars int, gens []bls12381.G1Affine, curve *mathlib.Curve, cfg FoldConfig) (*FieldSetup, error) {
-	rowVars := fieldRowVars(numVars)
+	return NewFieldSetupWithSplit(DefaultMatrixSplit(numVars), gens, curve, cfg)
+}
+
+// NewFieldSetupWithSplit is NewFieldSetup with the outer matrix split chosen by the
+// caller.
+//
+// # Why the split is a parameter
+//
+// The matrix split decides how the work divides between the two legs. 2^M1 columns
+// means leg 2 runs over M1 variables and each row MSM has length 2^M1, while leg 1
+// folds over the remaining RowVars = M - M1 variables and the evaluation domain is
+// sized 2^(RowVars + LogRate). Moving the cut trades one leg's cost against the
+// other's, and the balanced choice is not optimal for every size -- the Rust
+// reference ships tuned, asymmetric values per m.
+//
+// The split must satisfy ValidateForFold: both halves non-empty, and an EVEN row
+// half, since the coset layout halves it exactly. Within that, smaller M1 makes leg
+// 2 cheaper and the domain larger; larger M1 the reverse.
+//
+// Choosing a split is a commitment format decision, not just a local one: it is
+// recorded in Commitment.ColVars and the verifier checks against it, so a prover and
+// verifier holding different setups are rejected rather than silently proving
+// different polynomials.
+func NewFieldSetupWithSplit(split Split, gens []bls12381.G1Affine, curve *mathlib.Curve, cfg FoldConfig) (*FieldSetup, error) {
+	numVars := split.M
+	if err := split.ValidateForFold(); err != nil {
+		return nil, err
+	}
+	rowVars := split.RowVars()
 
 	if cfg == (FoldConfig{}) {
 		var err error
@@ -119,10 +154,10 @@ func NewFieldSetup(numVars int, gens []bls12381.G1Affine, curve *mathlib.Curve, 
 			"fold configuration is not valid for %d row variables (from %d total)", rowVars, numVars)
 	}
 
-	_, numCols := matrixShape(numVars)
+	numCols := split.Cols()
 	if len(gens) < numCols {
 		return nil, errors.Wrapf(ErrInsufficientGenerators,
-			"%d variables need %d generators, got %d", numVars, numCols, len(gens))
+			"%d variables split at %d need %d generators, got %d", numVars, split.M1, numCols, len(gens))
 	}
 
 	cg, err := NewGenerators(curve, gens)
@@ -135,8 +170,12 @@ func NewFieldSetup(numVars int, gens []bls12381.G1Affine, curve *mathlib.Curve, 
 		return nil, errors.WithMessagef(err, "failed to build the domain for %d row variables", rowVars)
 	}
 
-	return &FieldSetup{numVars: numVars, fold: cfg, gens: cg, dom: dom, curve: curve}, nil
+	return &FieldSetup{numVars: numVars, split: split, fold: cfg, gens: cg, dom: dom, curve: curve}, nil
 }
+
+// Split returns the matrix split the setup was built with. Provers and verifiers
+// sharing a setup necessarily agree on it.
+func (s *FieldSetup) Split() Split { return s.split }
 
 // NumVars returns the number of variables the committed polynomials have.
 func (s *FieldSetup) NumVars() int { return s.numVars }
@@ -193,7 +232,7 @@ func NewFieldProver(setup *FieldSetup, st FieldStatement, w FieldWitness) (*Fiel
 		return nil, err
 	}
 
-	com, hint, err := CommitFieldWithFold(w.Poly, setup.gens.Affine, setup.dom, 0, setup.fold)
+	com, hint, err := CommitFieldWithFoldAt(w.Poly, setup.gens.Affine, setup.dom, 0, setup.fold, setup.split)
 	if err != nil {
 		return nil, errors.WithMessage(err, "failed to commit the witness")
 	}

@@ -43,7 +43,17 @@ var (
 
 	// ErrInvalidSplit indicates that the MSM/folklore split point ell is outside
 	// the valid range [0, m].
+	//
+	// This is the sum-check prover's ell, NOT the matrix split; for that see
+	// ErrInvalidMatrixSplit. The two are distinct sentinels because they fail for
+	// unrelated reasons and a caller that confused them would look in the wrong
+	// place.
 	ErrInvalidSplit = errors.New("split point must be between 0 and the number of variables")
+
+	// ErrInvalidMatrixSplit indicates that the outer matrix split is unusable: a
+	// column half outside [1, m-1], or a row half with an odd number of variables,
+	// which the coset layout cannot fold.
+	ErrInvalidMatrixSplit = errors.New("invalid matrix split")
 
 	// ErrNilCurve indicates that a required curve parameter is nil.
 	ErrNilCurve = errors.New("curve cannot be nil")
