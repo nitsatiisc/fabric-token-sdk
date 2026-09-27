@@ -24,11 +24,11 @@ parallel between them:
 | **Group** | `sumcheck.GroupPoly` (`[]bls12381.G1Affine`) | Merkle root over the codeword of the polynomial itself | `bls12381.G1Affine` |
 
 The **field** scheme is the one a caller normally wants: it commits a scalar
-multilinear `f` in `m` variables and opens `f̃(α) = σ`. It is built *on top of* the
-group scheme — the row commitments of `f` form a group multilinear `G`, and `G` is
-what actually gets encoded and Merkle-committed. The **group** scheme is exported in
-its own right because that inner layer is independently useful, and because it is the
-honest place to put the folding phase.
+multilinear $`f`$ in $`m`$ variables and opens $`\tilde f(\alpha) = \sigma`$. It is built
+*on top of* the group scheme — the row commitments of $`f`$ form a group multilinear
+$`G`$, and $`G`$ is what actually gets encoded and Merkle-committed. The **group** scheme
+is exported in its own right because that inner layer is independently useful, and
+because it is the honest place to put the folding phase.
 
 Both follow the same four-step flow:
 
@@ -46,38 +46,42 @@ package only checks that the choice works.
 
 ### 2.1 What gets chosen
 
-A commitment is shaped by up to two splits, then by the soundness parameters.
+A commitment is shaped by up to two splits, then by the soundness parameters. In the
+formulas below:
 
-**Split 1: rows × columns (field scheme only).** The field polynomial `f` in `m`
-variables is read as a matrix with `2^M1` columns and `2^(m − M1)` rows:
+| symbol | meaning | in the API |
+|---|---|---|
+| $`m`$ | variables of the committed polynomial | `setup.NumVars()` |
+| $`M_1`$ | column variables of the field matrix | `Split.M1` |
+| $`m'`$ | variables of the group multilinear $`G`$ | `Commitment.NumVars` |
+| $`\ell`$ | coset dimension, and number of folding rounds | `FoldConfig.Ell` |
+| $`\rho`$ | code rate, $`\rho = 2^{-\mathrm{LogRate}}`$ | `FoldConfig.LogRate` |
+| $`Q`$ | number of consistency queries | `FoldConfig.Queries` |
 
-- each row is committed with a Pedersen MSM over the `2^M1` columns;
-- the row commitments form the group multilinear `G` in `m' = m − M1` variables;
+**Split 1: rows × columns (field scheme only).** The field polynomial $`f`$ in $`m`$
+variables is read as a matrix with $`2^{M_1}`$ columns and $`2^{m - M_1}`$ rows:
+
+- each row is committed with a Pedersen MSM over the $`2^{M_1}`$ columns;
+- the row commitments form the group multilinear $`G`$ in $`m' = m - M_1`$ variables;
 - the column half is opened by the CSP inner product.
 
-A group commitment has no matrix, so for the group scheme `m'` is simply `m`.
+A group commitment has no matrix, so for the group scheme $`m' = m`$.
 
-**Split 2: coset × reduced (both schemes).** The group multilinear `G` in `m'`
+**Split 2: coset × reduced (both schemes).** The group multilinear $`G`$ in $`m'`$
 variables is split once more:
 
-- `Ell` variables form the coset dimension. Each Merkle leaf holds `2^Ell` points,
-  and the prover folds `Ell` rounds.
-- The remaining `m' − Ell` variables form the reduced polynomial, which the prover
+- $`\ell`$ variables form the coset dimension. Each Merkle leaf holds $`2^{\ell}`$
+  points, and the prover folds $`\ell`$ rounds.
+- The remaining $`m' - \ell`$ variables form the reduced polynomial, which the prover
   sends in plain and the verifier checks directly.
 
-**Soundness parameters.** The rate `ρ = 2^−LogRate`, the number of consistency
-queries, and the regime the query count was derived under.
+**Soundness parameters.** The rate $`\rho`$, the number of queries $`Q`$, and the
+regime (`Capacity` or `Johnson`) the query count was derived under.
 
-| parameter | where it lives | scheme |
-|---|---|---|
-| `M1` (column variables) | `Split{M: m, M1}` | field |
-| `Ell` (coset dimension) | `FoldConfig.Ell` | both |
-| `LogRate`, `Queries`, `Regime` | `FoldConfig` | both |
-
-The prover's group sum-check also splits its variables internally, at `⌊m'/2⌋`, to
-decide how it computes the round messages. This is the prover's own bookkeeping: the
-messages are the same for every split, the verifier never sees it, and it is not part
-of the configuration.
+The prover's group sum-check also splits its variables internally, at
+$`\lfloor m'/2 \rfloor`$, to decide how it computes the round messages. This is the
+prover's own bookkeeping: the messages are the same for every split, the verifier never
+sees it, and it is not part of the configuration.
 
 ### 2.2 Canonical configuration
 
@@ -92,12 +96,13 @@ The package then chooses:
 
 | | field | group |
 |---|---|---|
-| split 1 | balanced, `M1 = m/2`, so `m' = m/2` | — (`m' = m`) |
-| split 2 | `Ell = DefaultEll(m', 43)` | `Ell = DefaultEll(m', 43)` |
-| soundness | `ρ = 1/8`, 43 queries, `Capacity` (128 bits) | same |
-| accepted sizes | `m ≡ 0 (mod 4)` | `m` even |
+| split 1 | balanced: $`M_1 = m/2`$, so $`m' = m/2`$ | none: $`m' = m`$ |
+| split 2 | $`\ell`$ = `DefaultEll(m', 43)` | $`\ell`$ = `DefaultEll(m', 43)` |
+| soundness | $`\rho = 1/8`$, $`Q = 43`$, `Capacity` (128 bits) | same |
+| accepted sizes | $`m \equiv 0 \pmod 4`$ | $`m`$ even |
 
-`DefaultEll` picks the `Ell ≤ m'/2` that minimises proof size, see [§2.5](#25-choosing-a-custom-configuration).
+`DefaultEll` picks the $`\ell \le m'/2`$ that minimises proof size, see
+[§2.5](#25-choosing-a-custom-configuration).
 
 The canonical configuration is strict on purpose: it covers the square shapes the
 defaults were tuned for. Any other size is rejected with `ErrInvalidFoldConfig`, and
@@ -118,17 +123,18 @@ A custom configuration is checked for **correctness only**:
 
 | check | rule | returns |
 |---|---|---|
-| split 1 (`Split.Validate`) | `m ≥ 1` and `1 ≤ M1 ≤ m − 1`; any parity, any balance | `ErrInvalidMatrixSplit` |
-| split 2 (`FoldConfig.Validate(m')`) | `1 ≤ Ell ≤ m'`; any parity, including `Ell > m'/2` | `ErrInvalidFoldConfig` |
-| rate, queries | `LogRate ≥ 1`, `Queries ≥ 1` | `ErrInvalidFoldConfig` |
+| split 1 (`Split.Validate`) | $`m \ge 1`$ and $`1 \le M_1 \le m - 1`$; any parity, any balance | `ErrInvalidMatrixSplit` |
+| split 2 (`FoldConfig.Validate`) | $`1 \le \ell \le m'`$; any parity, including $`\ell > m'/2`$ | `ErrInvalidFoldConfig` |
+| rate, queries | $`\rho < 1`$ (`LogRate` at least 1) and $`Q \ge 1`$ | `ErrInvalidFoldConfig` |
 | regime | `Capacity` or `Johnson` | `ErrInvalidFoldConfig` |
-| generators (field) | `len(gens) ≥ 2^M1` | `ErrInsufficientGenerators` |
+| generators (field) | at least $`2^{M_1}`$ generators in `gens` | `ErrInsufficientGenerators` |
 
-Nothing else is enforced. In particular, `Queries` may exceed the number of cosets
-`2^(m' − Ell + LogRate)`. The queries are independent draws, the prover opens each
+Nothing else is enforced. In particular, $`Q`$ may exceed the number of cosets,
+$`2^{m' - \ell} / \rho`$. The queries are independent draws, the prover opens each
 distinct one once, and many draws over a small oracle open most or all of it, which is
-at least as sound. A custom configuration uses the same code path as the canonical one, and
-`odd_test.go` shows that odd sizes and `Ell > m'/2` are complete and reject forgeries.
+at least as sound. A custom configuration uses the same code path as the canonical
+one, and `odd_test.go` shows that odd sizes and $`\ell > m'/2`$ are complete and reject
+forgeries.
 
 A typical custom configuration keeps the canonical soundness parameters and changes
 only the shape:
@@ -155,21 +161,27 @@ left at its default follows the canonical rule for that part:
 - `NewFieldSetup(m, gens, nil, cfg)` with a non-zero `cfg` takes the balanced split
   and your fold.
 - `NewFieldSetupWithSplit(split, gens, nil, FoldConfig{})` takes your split and the
-  canonical fold on its row half. That needs an even `m'`.
+  canonical fold on its row half. That needs an even $`m'`$.
 
 ### 2.4 Soundness parameters
 
-`DefaultSecurityBits = 128`, `DefaultLogRate = 3` (`ρ = 1/8`). The query count is
-`QueryCount(λ, LogRate, regime)`:
+The defaults are `DefaultSecurityBits` $`\lambda = 128`$ and `DefaultLogRate = 3`, so
+$`\rho = 1/8`$. `QueryCount` returns
 
-- **`Capacity`**, the default, gives `⌈128/3⌉ = 43` queries (42 would give only 126
-  bits). It is the conjectured bound, and the one the reference implementation and the
-  paper's cost analysis use.
+```math
+Q = \left\lceil \frac{\lambda}{\log_2(1/\rho)} \right\rceil \ \text{(Capacity)},
+\qquad
+Q = \left\lceil \frac{2\lambda}{\log_2(1/\rho)} \right\rceil \ \text{(Johnson)}.
+```
+
+- **`Capacity`**, the default, gives $`\lceil 128/3 \rceil = 43`$ queries (42 would
+  give only 126 bits). It is the conjectured bound, and the one the reference
+  implementation and the paper's cost analysis use.
 - **`Johnson`** gives 86 queries at the same target. It is the provable bound: a caller
   that needs one should set it explicitly.
 
 `FoldConfig.SecurityBits()` is the inverse of `QueryCount`, so a caller who sets
-`Queries` by hand can see what the choice buys.
+$`Q`$ by hand can see what the choice buys.
 
 The reference implementation uses 70 queries. That count accounts for the Johnson
 radius together with folding the CSP leg. This package does not fold the CSP leg, so
@@ -179,23 +191,29 @@ the number does not apply here.
 
 **Split 1** trades the column side against the row side:
 
-| | smaller `M1` | larger `M1` |
+| | smaller $`M_1`$ | larger $`M_1`$ |
 |---|---|---|
 | CSP inner product | cheaper | more expensive |
 | Pedersen generators needed | fewer | more |
 | row MSM length | shorter | longer |
-| group multilinear `G`, domain, FFT | **larger** | smaller |
+| group multilinear $`G`$, domain, FFT | **larger** | smaller |
 
-The canonical `M1 = m/2` keeps the column half as small as a balanced split allows,
+The canonical $`M_1 = m/2`$ keeps the column half as small as a balanced split allows,
 because this package does not fold the CSP leg, so every column variable costs a
-linear amount. The Rust reference folds that leg and so uses `m/2 − 2`.
+linear amount. The Rust reference folds that leg and so uses $`M_1 = m/2 - 2`$.
 
-**Split 2** trades the two parts of the proof. The proof carries up to `Queries` cosets of
-`2^Ell` points plus `2^(m' − Ell)` reduced coefficients, so its size is roughly
-`Queries·2^Ell + 2^(m' − Ell)`. `DefaultEll(m', Queries)` minimises this over
-`1 ≤ Ell ≤ m'/2`. Because of the `Queries` factor, the optimum is well below `m'/2`:
-it is 1 up to `m' = 8`, 3 at `m' = 12`, and 5 at `m' = 16`. A larger `Ell` shrinks
-the reduced polynomial, and with it the verifier's work, at the cost of a larger proof.
+**Split 2** trades the two parts of the proof. The proof carries up to $`Q`$ cosets of
+$`2^{\ell}`$ points plus the $`2^{m' - \ell}`$ coefficients of the reduced polynomial, so
+its size in group elements is roughly
+
+```math
+Q \cdot 2^{\ell} + 2^{m' - \ell}.
+```
+
+`DefaultEll(m', Q)` minimises this over $`1 \le \ell \le m'/2`$. Because of the factor
+$`Q`$, the optimum is well below $`m'/2`$: it is 1 up to $`m' = 8`$, 3 at $`m' = 12`$,
+and 5 at $`m' = 16`$. A larger $`\ell`$ shrinks the reduced polynomial, and with it the
+verifier's work, at the cost of a larger proof.
 
 ---
 
@@ -214,12 +232,13 @@ func (s *FieldSetup) FoldConfig() FoldConfig
 
 See [§2](#2-configuration-canonical-or-custom) for which constructor and `cfg` to use.
 
-- `gens` must hold at least `2^M1` Pedersen generators. Surplus generators are ignored.
+- `gens` must hold at least $`2^{M_1}`$ Pedersen generators. Surplus generators are
+  ignored.
 - `curve` may be `nil`, which means the curve matching this package's types. It is
   used for the Fiat–Shamir transcript and the CSP inner product.
 
 A setup is the shared public parameter, and **the prover and the verifier must hold the
-same one**. The commitment records `M1`, and the verifier rejects a commitment made
+same one**. The commitment records $`M_1`$, and the verifier rejects a commitment made
 under a different split.
 
 ### 3.2 Statement and witness
@@ -238,14 +257,14 @@ func (p *FieldProver) Prove() (*EvalProof, fr.Element, error)
 func (p *FieldProver) ProveAt(alpha []fr.Element) (*EvalProof, fr.Element, error)
 ```
 
-`NewFieldProver` commits: it runs the row MSMs, encodes `G`, and builds the Merkle tree
-over the coset oracle. So `Commitment()` is available before any proof, and the
+`NewFieldProver` commits: it runs the row MSMs, encodes $`G`$, and builds the Merkle
+tree over the coset oracle. So `Commitment()` is available before any proof, and the
 commitment can be bound into a transcript before the evaluation point is drawn.
 
-`Prove()` opens at `st.Alpha`. It returns the proof and `σ = f̃(α)`, and it computes
-`σ` itself rather than taking it as an input. `ProveAt(alpha)` opens the same
-commitment at another point. The caller must draw that point from its transcript
-**after** binding the commitment.
+`Prove()` opens at `st.Alpha`. It returns the proof and $`\sigma = \tilde f(\alpha)`$,
+and it computes $`\sigma`$ itself rather than taking it as an input. `ProveAt(alpha)`
+opens the same commitment at another point. The caller must draw that point from its
+transcript **after** binding the commitment.
 
 ### 3.4 Verifier
 
@@ -322,8 +341,8 @@ func (v *GroupVerifier) Verify(proof *GroupEvalProof, sigma *bls12381.G1Affine) 
 func (v *GroupVerifier) VerifyErr(proof *GroupEvalProof, sigma *bls12381.G1Affine) error
 ```
 
-The canonical configuration takes even `m`. A custom `FoldConfig` takes any `m ≥ 1`
-([§2](#2-configuration-canonical-or-custom)).
+The canonical configuration takes even $`m`$. A custom `FoldConfig` takes any
+$`m \ge 1`$ ([§2](#2-configuration-canonical-or-custom)).
 
 ---
 
@@ -344,8 +363,8 @@ type Commitment struct {
 A caller only passes the commitment from the prover to the verifier. Three fields can
 mislead when read directly:
 
-- **`NumVars` is `m'`, not `m`.** For a field commitment it counts the rows' variables
-  only. `m` comes from the setup or the statement.
+- **`NumVars` is $`m'`$, not $`m`$.** For a field commitment it counts the rows'
+  variables only. $`m`$ comes from the setup or the statement.
 - **`ColVars` records split 1.** The verifier checks it against its own setup and
   rejects a mismatch. `0` on a field commitment is read as the balanced split.
 - **`Root` is unused.** The one root that binds the polynomial is `Cosets.Root`. `Root`
@@ -361,9 +380,9 @@ caller of the PCS interface will see:
 
 | sentinel | meaning |
 |---|---|
-| `ErrInvalidMatrixSplit` | split 1 is invalid: `m ≤ 0`, or `M1` is outside `[1, m − 1]` |
+| `ErrInvalidMatrixSplit` | split 1 is invalid: $`m \le 0`$, or $`M_1`$ is outside $`[1, m-1]`$ |
 | `ErrInvalidFoldConfig` | the canonical configuration was asked for a size it does not cover, or a custom `FoldConfig` failed a check in [§2.3](#23-custom-configuration) |
-| `ErrInsufficientGenerators` | fewer than `2^M1` Pedersen generators |
+| `ErrInsufficientGenerators` | fewer than $`2^{M_1}`$ Pedersen generators |
 | `ErrNumVarsMismatch` | `Alpha`, the polynomial and the setup disagree on the variable count |
 | `ErrQueryCountMismatch` | the proof does not carry exactly one opening per distinct sampled index |
 | `ErrCosetOpeningInvalid` | **a consistency query failed**: the coset is not under the root, or does not fold to the reduced polynomial. This is the error that catches a prover who committed to one polynomial and folded another |
@@ -371,7 +390,7 @@ caller of the PCS interface will see:
 | `ErrReducedPolyMismatch` | the reduced polynomial has the wrong length |
 | `ErrFoldRoundMismatch` | wrong round count, or a round message inconsistent with the previous claim |
 | `ErrRoundCheckFailed`, `ErrSumMismatch` | a sum-check round is inconsistent |
-| `ErrDomainTooLarge` | the domain exceeds BLS12-381 Fr's two-adicity of `2^32` |
+| `ErrDomainTooLarge` | the domain exceeds the two-adicity $`2^{32}`$ of the BLS12-381 scalar field |
 
 `ErrInvalidSplit` belongs to the prover's internal sum-check split, not to either
 split in [§2](#2-configuration-canonical-or-custom). A caller of the PCS does not see it.
@@ -387,9 +406,10 @@ Deliberate omissions, each with a reason:
   there is no wire encoding yet.
 - **No batch opening.** One point per proof (`ProveAt` can open one commitment at
   several points, one proof each).
-- **No zero-knowledge.** The proof reveals up to `Queries` cosets of the oracle and the
+- **No zero-knowledge.** The proof reveals up to $`Q`$ cosets of the oracle and the
   reduced polynomial in plain. Titan is a commitment scheme here, not a ZK argument.
 - **Not WHIR proper.** The reduced polynomial is sent in plain rather than recursed on,
-  so the verifier is `O(2^(m−Ell))` rather than polylogarithmic.
-- **No `O(n^¼)`.** That needs a second folding layer over the *generator* oracle — the
-  reference's `l2`. Its absence is why the canonical `M1` is `m/2` rather than `m/2 − 2`.
+  so the verifier is $`O(2^{m' - \ell})`$ rather than polylogarithmic.
+- **No $`O(n^{1/4})`$ variant.** That needs a second folding layer over the *generator*
+  oracle — the reference's `l2`. Its absence is why the canonical $`M_1`$ is $`m/2`$
+  rather than $`m/2 - 2`$.
