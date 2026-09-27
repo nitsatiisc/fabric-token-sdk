@@ -26,7 +26,7 @@ hold, with a single proof whose size and verification cost are logarithmic in $`
 It is the meta-protocol of the mixed-witness-aggregation write-up, built from two
 existing pieces:
 
-- [sum-check](sumcheck.md), including its sum-of-products `MultiClaim` (§4.6 there);
+- [sum-check](sumcheck.md), including its composite `MultiClaim` (§4.6 there);
 - the [Titan PCS](titan.md), for field polynomials (the field witnesses) and group
   polynomials (the group witnesses).
 
@@ -108,7 +108,7 @@ After the commitments, and after $`\tau \leftarrow \mathbb{F}^{\log K}`$:
   verifier evaluates $`\tilde G(\rho_l)`$ itself.
 - **SC3** is the zero-check of the $`K`$ field constraints. Its pool is
   $`[\mathrm{eq}(\cdot,\tau), \tilde L_1, \ldots, \tilde L_{\tau}]`$, and its composition is $`\mathrm{eq} \cdot \Phi(\tilde L_1, \ldots)`$, a
-  `sumcheck.Func` of degree `PhiDegree + 1`. It is skipped when $`\Phi`$ is nil.
+  `MultiClaim` of degree `PhiDegree + 1`. It is skipped when $`\Phi`$ is nil.
 - **SC4** discharges every sparse product in one sum-check over $`x`$. Term $`j`$, weighted
   $`\theta^j`$, is $`S_j(x) \cdot \tilde W(x, z_j)`$:
 

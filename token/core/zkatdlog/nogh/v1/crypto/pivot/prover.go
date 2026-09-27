@@ -286,14 +286,13 @@ func (p *prover) sc2() error {
 	return nil
 }
 
-// sc3Phi returns SC3's composition over the pool [eq(., tau), L~_1, ..., L~_tau]:
-// the eq factor times Phi of the form values.
-func sc3Phi(rel *Relation) sumcheck.Func {
-	return sumcheck.Func{Deg: 1 + rel.PhiDegree, F: func(v []fr.Element) fr.Element {
+// sc3Claim returns SC3's claim over the pool [eq(., tau), L~_1, ..., L~_tau]: the
+// eq factor times Phi of the form values, of degree 1 + PhiDegree.
+func sc3Claim(rel *Relation, pool []sumcheck.FieldPoly) *sumcheck.MultiClaim {
+	return &sumcheck.MultiClaim{Polys: pool, Degree: 1 + rel.PhiDegree, Phi: func(v []fr.Element) fr.Element {
 		out := rel.Phi(v[1:])
-		out.Mul(&out, &v[0])
 
-		return out
+		return *out.Mul(&out, &v[0])
 	}}
 }
 
@@ -315,7 +314,7 @@ func (p *prover) sc3() error {
 	}
 
 	proof, open, err := sumcheck.ProveMultiWithTranscript(p.setup.curve,
-		&sumcheck.MultiClaim{Polys: pool, Phi: sc3Phi(p.rel)}, p.tr)
+		sc3Claim(p.rel, pool), p.tr)
 	if err != nil {
 		return errors.WithMessage(err, "SC3")
 	}
@@ -384,18 +383,25 @@ func (p *prover) sc4() error {
 
 	pw := powers(theta, len(sels))
 	pool := make([]sumcheck.FieldPoly, 0, 2*len(sels))
-	terms := make([]sumcheck.Term, len(sels))
-	for j, sl := range sels {
+	for _, sl := range sels {
 		w := sl.w
 		if w == nil {
 			w = restrictRows(p.c.wit.W, eqTable(sl.z), s.N())
 		}
 		pool = append(pool, sl.table, w)
-		terms[j] = sumcheck.Term{Coeff: pw[j], Factors: []int{2 * j, 2*j + 1}}
 	}
 
 	proof, open, err := sumcheck.ProveMultiWithTranscript(p.setup.curve,
-		&sumcheck.MultiClaim{Polys: pool, Phi: sumcheck.Terms(terms)}, p.tr)
+		&sumcheck.MultiClaim{Polys: pool, Degree: 2, Phi: func(v []fr.Element) fr.Element {
+			// sum_j theta^j * table_j * W~(., z_j), the tables and W~ paired in the pool.
+			var out, t fr.Element
+			for j := range pw {
+				t.Mul(&v[2*j], &v[2*j+1]).Mul(&t, &pw[j])
+				out.Add(&out, &t)
+			}
+
+			return out
+		}}, p.tr)
 	if err != nil {
 		return errors.WithMessage(err, "SC4")
 	}

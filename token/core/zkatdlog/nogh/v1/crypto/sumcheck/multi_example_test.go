@@ -29,16 +29,15 @@ func ExampleProveMulti() {
 
 		return p
 	}
-	var two, minusOne fr.Element
-	two.SetUint64(2)
-	minusOne.SetOne()
-	minusOne.Neg(&minusOne)
-
 	claim := &sumcheck.MultiClaim{
-		Polys: []sumcheck.FieldPoly{table(1, 2, 3, 4), table(5, 6, 7, 8)},
-		Phi: sumcheck.Terms{
-			{Coeff: two, Factors: []int{0, 1}},      // 2 h0 h1
-			{Coeff: minusOne, Factors: []int{1, 1}}, // - h1^2
+		Polys:  []sumcheck.FieldPoly{table(1, 2, 3, 4), table(5, 6, 7, 8)},
+		Degree: 2,
+		Phi: func(h []fr.Element) fr.Element { // 2 h0 h1 - h1^2
+			var a, b fr.Element
+			a.Mul(&h[0], &h[1]).Double(&a)
+			b.Square(&h[1])
+
+			return *a.Sub(&a, &b)
 		},
 	}
 
@@ -72,7 +71,7 @@ func ExampleProveMulti() {
 	// The sum over the four points is (10-25) + (24-36) + (42-49) + (64-64) = -34.
 	var sum fr.Element
 	sum.SetBytes(proof.FieldSum.Bytes())
-	fmt.Println("degree:", claim.Degree())
+	fmt.Println("degree:", claim.Degree)
 	fmt.Println("sum:", sum.String())
 	fmt.Println("residual closes:", product.Equal(&phi))
 	// Output:

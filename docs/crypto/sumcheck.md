@@ -267,38 +267,19 @@ check.
 H = \sum_{x \in \{0,1\}^{\mu}} \Phi\bigl(h_1(x), \ldots, h_p(x)\bigr)
 ```
 
-The prover only ever evaluates $`\Phi`$ at points, so it can be given either as a
-list of products or as a plain function.
+$`\Phi`$ is a plain Go function. The prover only ever evaluates it at points, and
+the caller evaluates it once to close the residual claim, so it never has to be
+expanded into monomials.
 
 #### 4.6.1 Types
 
 ```go
-// Composition is Phi. Degree bounds its total degree, which is the degree of every
-// round polynomial; Evaluate takes one value per pool polynomial.
-type Composition interface {
-    Degree() int
-    Evaluate(vals []fr.Element) fr.Element
-}
-
-// Terms is Phi as a sum of products: sum_j Coeff_j * prod_{i in Factors_j} h_i.
-// An index may repeat (a power). Factors must be non-empty.
-type Term struct {
-    Coeff   fr.Element
-    Factors []int
-}
-type Terms []Term
-
-// Func is Phi as a function, with a declared degree. F must not modify or retain
-// its argument.
-type Func struct {
-    Deg int
-    F   func(vals []fr.Element) fr.Element
-}
-
-// MultiClaim: the pool of multilinears and Phi over it.
+// MultiClaim: the pool of multilinears, the degree of Phi, and Phi over the pool.
+// Phi receives one value per pool polynomial and must not modify or retain it.
 type MultiClaim struct {
-    Polys []FieldPoly
-    Phi   Composition
+    Polys  []FieldPoly
+    Degree int
+    Phi    func(vals []fr.Element) fr.Element
 }
 
 // MultiShape is the public shape a verifier needs.
@@ -308,33 +289,37 @@ type MultiShape struct {
 }
 ```
 
-For example, $`\Phi(X, Y, Z) = X(1-Y)(1-Z) + XZ`$ is
+For example, $`\Phi(X, Y, Z) = X(1-Y)(1-Z) + XZ`$ over a pool of three polynomials is
 
 ```go
-phi := sumcheck.Func{Deg: 3, F: func(v []fr.Element) fr.Element {
-    var one, a, b fr.Element
-    one.SetOne()
-    a.Sub(&one, &v[1])
-    b.Sub(&one, &v[2])
-    a.Mul(&a, &b).Mul(&a, &v[0]) // X(1-Y)(1-Z)
-    b.Mul(&v[0], &v[2])          // XZ
+claim := &sumcheck.MultiClaim{
+    Polys:  []sumcheck.FieldPoly{x, y, z},
+    Degree: 3,
+    Phi: func(v []fr.Element) fr.Element {
+        var one, a, b fr.Element
+        one.SetOne()
+        a.Sub(&one, &v[1])
+        b.Sub(&one, &v[2])
+        a.Mul(&a, &b).Mul(&a, &v[0]) // X(1-Y)(1-Z)
+        b.Mul(&v[0], &v[2])          // XZ
 
-    return *a.Add(&a, &b)
-}}
+        return *a.Add(&a, &b)
+    },
+}
 ```
 
-**Declared degree.** `Func.Deg` must bound the true total degree. An understated
-degree breaks completeness, since the honest round polynomials do not fit, but not
-soundness: the error per round is $`\max(d_{\text{declared}}, d_{\text{true}}) / \lvert\mathbb{F}\rvert`$
-(`TestMultiFuncUnderstatedDegreeFails`).
+**Declared degree.** `Degree` must bound the total degree of $`\Phi`$. An understated
+degree breaks completeness, since the honest round polynomials do not fit
+(`TestMultiUnderstatedDegreeFails`). It does not affect soundness: the verifier's
+caller closes the claim with the correct $`\Phi`$, so a prover working with any other
+polynomial is caught except with probability
+$`\max(d_{\text{declared}}, d_{\text{true}}) / \lvert\mathbb{F}\rvert`$ per round.
 
-| Method / function | Returns |
+| Method | Returns |
 |---|---|
 | `(*MultiClaim).NumVars() int` | the number of variables shared by the pool |
-| `(*MultiClaim).Degree() int` | the round degree, `Phi.Degree()` |
 | `(*MultiClaim).Shape() MultiShape` | `{NumVars, Degree}`, to hand to the verifier |
-| `(*MultiClaim).Evaluate(evals []fr.Element) (fr.Element, error)` | $`\Phi`$ at the pool values `evals` |
-| `EvaluateTerms(terms []Term, evals []fr.Element) (fr.Element, error)` | the same for `Terms`, reporting an out-of-range index |
+| `(*MultiClaim).Evaluate(evals []fr.Element) (fr.Element, error)` | $`\Phi`$ at the pool values `evals`; `ErrPoolSize` if there is not one value per pool polynomial |
 
 #### 4.6.2 Proving and verifying
 
@@ -359,7 +344,7 @@ so the caller's tables are not modified.
 A nil error from `VerifyMulti` means only that the sum follows from the residual
 claim. The caller closes it by obtaining the pool values at $`R`$ — from a commitment
 opening, or directly — and checking that $`\Phi`$ at those values equals
-`opening.Product`, with `claim.Evaluate` or `Phi.Evaluate`.
+`opening.Product`.
 
 #### 4.6.3 Example
 
@@ -369,9 +354,13 @@ $`\Phi(h_0, h_1) = 2 h_0 h_1 - h_1^2`$ over two variables:
 ```go
 claim := &sumcheck.MultiClaim{
     Polys: []sumcheck.FieldPoly{h0, h1},
-    Phi: sumcheck.Terms{
-        {Coeff: two, Factors: []int{0, 1}},      // 2 h0 h1
-        {Coeff: minusOne, Factors: []int{1, 1}}, // - h1^2
+    Degree: 2,
+    Phi: func(h []fr.Element) fr.Element { // 2 h0 h1 - h1^2
+        var a, b fr.Element
+        a.Mul(&h[0], &h[1]).Double(&a)
+        b.Square(&h[1])
+
+        return *a.Sub(&a, &b)
     },
 }
 proof, _, err := sumcheck.ProveMulti(curve, claim)
@@ -385,18 +374,12 @@ ok := phi.Equal(productOf(opening))             // opening.Product as fr.Element
 
 #### 4.6.4 Rules and errors
 
-- **Structure:** at least one pool polynomial, a non-nil `Phi` of degree at least 1
-  (and a non-nil `F` for a `Func`), and every pool polynomial with the same number of
-  variables (at least one) and a power-of-two table. Violations return
-  `ErrNoFactors`, `ErrNumVarsMismatch` or `ErrNotPowerOfTwo`.
-- **Terms:** every term has at least one factor (`ErrNoFactors`), and every index is
-  in range (`ErrFactorIndex`). A constant term can be written with a factor that is
-  the all-ones table; a `Func` can simply return a constant.
-- **Degree:** the round degree is `Phi.Degree()`: the largest term degree for
-  `Terms`, the declared `Deg` for a `Func`. A verifier that passes a different degree
+- **Structure:** at least one pool polynomial, a non-nil `Phi`, `Degree` at least 1,
+  and every pool polynomial with the same number of variables (at least one) and a
+  power-of-two table. Violations return `ErrNoFactors`, `ErrNumVarsMismatch` or
+  `ErrNotPowerOfTwo`.
+- **Degree:** the round degree is `Degree`. A verifier that passes a different degree
   gets `ErrRoundDegreeMismatch`.
-- **Equivalence:** a `Func` and the `Terms` of the same polynomial produce the same
-  proof (`TestMultiFuncMatchesTerms`).
 - **Field only:** group factors are not supported in a `MultiClaim`. A product with
   one group factor is a `Claim`.
 - **Sharing:** a polynomial used several times, or squared, is stored and folded
@@ -407,8 +390,8 @@ ok := phi.Equal(productOf(opening))             // opening.Product as fr.Element
   single-product proof of the same size (`TestMultiRejectsTampering`). The
   `WithTranscript` variants leave domain separation and shape binding to the caller,
   as in §4.5.
-- **Equivalence:** a one-term `MultiClaim` produces exactly the proof `Prove` produces
-  for the equivalent `Claim` under the same transcript
+- **Equivalence:** a `MultiClaim` whose $`\Phi`$ is a single product produces exactly
+  the proof `Prove` produces for the equivalent `Claim` under the same transcript
   (`TestMultiSingleTermMatchesClaim`).
 
 ## 5. Transcript and Fiat–Shamir

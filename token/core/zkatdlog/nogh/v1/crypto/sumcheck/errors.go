@@ -75,7 +75,7 @@ var (
 	// field-only claim.
 	ErrMixedProofKind = errors.New("proof kind does not match claim")
 
-	// ErrFactorIndex indicates that a MultiClaim term names a pool polynomial that
-	// does not exist.
-	ErrFactorIndex = errors.New("term factor index out of range")
+	// ErrPoolSize indicates that the values passed to MultiClaim.Evaluate do not
+	// match the pool, one per polynomial.
+	ErrPoolSize = errors.New("values do not match the pool size")
 )
