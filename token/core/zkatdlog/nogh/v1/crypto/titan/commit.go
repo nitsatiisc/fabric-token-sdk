@@ -48,19 +48,9 @@ import (
 // so the shape travels with it and a verifier must check it against what it
 // expects.
 type Commitment struct {
-	// Root is RESERVED FOR POSSIBLE FUTURE USE and is always nil.
-	//
-	// It once held the Merkle root over the flat codeword of the group multilinear.
-	// Nothing ever verified against it: the folding phase -- the only stage that
-	// opens the oracle -- queries the coset-wise oracle under Cosets.Root, and the
-	// flat codeword is a computational stepping stone to that, not a commitment
-	// anyone opens. So the tree was built, hashed and published for no verifier.
-	//
-	// It is nil rather than removed to keep the field name reserved. Retaining it as
-	// a *populated* field would be worse than either: an exported []byte called Root
-	// invites a future batching or serialization layer to VerifyMerkleProof against
-	// it, which would pass while binding nothing the protocol relies on. Nil makes
-	// that misuse fail immediately instead of silently.
+	// Root is unused and always nil. The root that binds the polynomial is
+	// Cosets.Root. Root is kept as a nil placeholder so that code verifying against
+	// it fails at once instead of passing while binding nothing.
 	Root []byte
 	// NumVars is the number of variables of the committed group multilinear G.
 	// For a field commitment this is log2 of the matrix row count, not the
@@ -73,29 +63,18 @@ type Commitment struct {
 	// NumLeaves is the leaf count of the tree, |L| / 2^K.
 	NumLeaves int
 
-	// ColVars is the number of COLUMN variables of the field polynomial, i.e. the
-	// M1 of the matrix split, or 0 for a group commitment (which has no matrix).
-	//
-	// It is on the wire because the split is a free parameter and NumVars does not
-	// determine it. NumVars is log2 of the ROW count, so it pins down RowVars and
-	// nothing else: a commitment with NumVars = 4 is consistent with every M1, and
-	// before this field existed checkShape had to take the total variable count
-	// from alpha and could not detect a prover and verifier disagreeing about where
-	// the matrix was cut. See checkShape, which now cross-checks against this.
-	//
-	// Group commitments leave it 0, which is also what an older field commitment
-	// deserializes to; checkShape treats 0 as "not stated" and falls back to the
-	// balanced split, so such a commitment still verifies exactly as it did.
+	// ColVars is the M1 of the matrix split for a field commitment, and 0 for a
+	// group commitment. NumVars fixes only the row half, so the split is recorded
+	// here and the verifier checks it against its setup, rejecting a commitment
+	// made under a different split. 0 on a field commitment is read as the
+	// balanced split.
 	ColVars int
 
 	// Cosets is the commitment to the coset-wise oracle the folding phase
 	// queries, or nil if the polynomial was committed without one.
 	//
-	// It is a second root rather than a reuse of Root because the two commit
-	// genuinely different values: Root covers the flat codeword, whose entries
-	// are full power-curve points, while Cosets covers the slice-wise oracle
-	// whose leaves are { G(b, powers(y)) }. See EncodeCosets. A verifier that
-	// checked fold openings against Root would reject every honest proof.
+	// Its leaves are the cosets { G(b, powers(y)) } of the slice-wise oracle; see
+	// EncodeCosets.
 	//
 	// A nil Cosets means Eval/EvalGroup can still reduce a claim but cannot
 	// close it: without the coset oracle there is nothing for the consistency

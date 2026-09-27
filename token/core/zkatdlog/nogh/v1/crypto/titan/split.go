@@ -74,22 +74,13 @@ func (s Split) Rows() int { return 1 << s.RowVars() }
 // generators a field commitment needs.
 func (s Split) Cols() int { return 1 << s.M1 }
 
-// Validate checks that the split describes a usable matrix form.
+// Validate checks that the split is a valid matrix form, and nothing more: M is
+// positive and M1 leaves at least one variable on each side, 1 <= M1 <= M-1. Any
+// parity and any imbalance is accepted; the fold's own constraints are checked by
+// FoldConfig.Validate against RowVars.
 //
-// This is the COMMIT-time contract, and it is deliberately weaker than what folding
-// needs. A matrix only requires that the two halves multiply back to 2^M, so the
-// rules here are that M is positive and that M1 leaves a whole number of variables
-// on each side. Committing a field polynomial at an odd row half is perfectly well
-// defined -- it produces 2^RowVars Pedersen commitments like any other shape -- and
-// this package did exactly that before the split became a parameter.
-//
-// This is also all the fold needs from a split: any row half, odd or even, can carry
-// a fold, whose own constraints live in FoldConfig.Validate. An earlier version had a
-// separate ValidateForFold demanding an EVEN row half; that rule was not needed for
-// correctness and was removed (see docs/crypto/titan.md, section 13.10).
-//
-// M1 == 0 is allowed only at M == 1, the degenerate 2x1 matrix, because
-// matrixShape(1) produced it before and no configuration can fold it anyway.
+// M1 == 0 is allowed only at M == 1, the degenerate 2x1 matrix, which no fold
+// configuration accepts anyway.
 func (s Split) Validate() error {
 	if s.M <= 0 {
 		return errors.Wrapf(ErrInvalidMatrixSplit, "number of variables must be positive, got %d", s.M)

@@ -1,9 +1,8 @@
 # Titan PCS — interface reference
 
 The `titan` package implements the Titan polynomial commitment scheme over BLS12-381
-G1. This page documents the **public interface**: the types a caller touches, the
-order to call them in, and the size constraints that decide whether a given number of
-variables is usable at all.
+G1. This page documents the **public interface**: how to configure a setup, the types a
+caller touches, and the order to call them in.
 
 For the construction itself — what the two legs prove and why the consistency queries
 are the binding step — see [`titan-crypto.tex`](titan-crypto.tex). For the internal
@@ -39,9 +38,168 @@ Setup  ->  Prover(Setup, Statement, Witness)  ->  Prove()  ->  Verifier(Setup, S
 
 ---
 
-## 2. Field scheme
+## 2. Configuration: canonical or custom
 
-### 2.1 Setup
+Every setup is built one of two ways. In the **canonical** configuration the package
+chooses everything. In a **custom** configuration the caller chooses everything, and the
+package only checks that the choice works.
+
+### 2.1 What gets chosen
+
+A commitment is shaped by up to two splits, then by the soundness parameters.
+
+**Split 1: rows × columns (field scheme only).** The field polynomial `f` in `m`
+variables is read as a matrix with `2^M1` columns and `2^(m − M1)` rows:
+
+- each row is committed with a Pedersen MSM over the `2^M1` columns;
+- the row commitments form the group multilinear `G` in `m' = m − M1` variables;
+- the column half is opened by the CSP inner product.
+
+A group commitment has no matrix, so for the group scheme `m'` is simply `m`.
+
+**Split 2: coset × reduced (both schemes).** The group multilinear `G` in `m'`
+variables is split once more:
+
+- `Ell` variables form the coset dimension. Each Merkle leaf holds `2^Ell` points,
+  and the prover folds `Ell` rounds.
+- The remaining `m' − Ell` variables form the reduced polynomial, which the prover
+  sends in plain and the verifier checks directly.
+
+**Soundness parameters.** The rate `ρ = 2^−LogRate`, the number of consistency
+queries, and the regime the query count was derived under.
+
+| parameter | where it lives | scheme |
+|---|---|---|
+| `M1` (column variables) | `Split{M: m, M1}` | field |
+| `Ell` (coset dimension) | `FoldConfig.Ell` | both |
+| `LogRate`, `Queries`, `Regime` | `FoldConfig` | both |
+
+The group sum-check inside the opening also splits its variables, at `⌊m'/2⌋`. That
+split only affects the prover's cost, both sides derive it themselves, and it is not
+configurable.
+
+### 2.2 Canonical configuration
+
+Pass the zero `FoldConfig`:
+
+```go
+fs, err := titan.NewFieldSetup(m, gens, nil, titan.FoldConfig{})
+gs, err := titan.NewGroupSetup(m, nil, titan.FoldConfig{})
+```
+
+The package then chooses:
+
+| | field | group |
+|---|---|---|
+| split 1 | balanced, `M1 = m/2`, so `m' = m/2` | — (`m' = m`) |
+| split 2 | `Ell = DefaultEll(m', 43)` | `Ell = DefaultEll(m', 43)` |
+| soundness | `ρ = 1/8`, 43 queries, `Capacity` (128 bits) | same |
+| accepted sizes | `m ≡ 0 (mod 4)`, `m ≥ 8` | `m` even, `m ≥ 4` |
+
+`DefaultEll` picks the `Ell ≤ m'/2` that minimises proof size, see [§2.5](#25-choosing-a-custom-configuration).
+
+The canonical configuration is strict on purpose: it covers the square shapes the
+defaults were tuned for. Any other size is rejected with `ErrInvalidFoldConfig`, and
+the error message points to the custom route. The strictness is about tuning only.
+Every size the custom route accepts is just as sound.
+
+### 2.3 Custom configuration
+
+Pass both splits and a non-zero `FoldConfig`:
+
+```go
+split := titan.Split{M: m, M1: m1}
+fs, err := titan.NewFieldSetupWithSplit(split, gens, nil, cfg)
+gs, err := titan.NewGroupSetup(m, nil, cfg)
+```
+
+A custom configuration is checked for **correctness only**:
+
+| check | rule | returns |
+|---|---|---|
+| split 1 (`Split.Validate`) | `m ≥ 1` and `1 ≤ M1 ≤ m − 1`; any parity, any balance | `ErrInvalidMatrixSplit` |
+| split 2 (`FoldConfig.Validate(m')`) | `1 ≤ Ell ≤ m'`; any parity, including `Ell > m'/2` | `ErrInvalidFoldConfig` |
+| rate, queries | `LogRate ≥ 1`, `Queries ≥ 1` | `ErrInvalidFoldConfig` |
+| drawability | `Queries ≤ 2^(m' − Ell + LogRate)`, since the queries are distinct cosets | `ErrInvalidFoldConfig` |
+| regime | `Capacity` or `Johnson` | `ErrInvalidFoldConfig` |
+| generators (field) | `len(gens) ≥ 2^M1` | `ErrInsufficientGenerators` |
+
+Nothing else is enforced. At the default rate and 43 queries, drawability means
+`m' − Ell ≥ 3`, so `m' ≥ 4`. A custom configuration uses the same code path as the canonical one, and
+`odd_test.go` shows that odd sizes and `Ell > m'/2` are complete and reject forgeries.
+
+A typical custom configuration keeps the canonical soundness parameters and changes
+only the shape:
+
+```go
+q, err := titan.QueryCount(titan.DefaultSecurityBits, titan.DefaultLogRate, titan.Capacity) // 43
+if err != nil {
+    return err
+}
+
+split := titan.Split{M: 10, M1: 4} // 2^6 rows x 2^4 columns, so m' = 6
+cfg := titan.FoldConfig{
+    Ell:     titan.DefaultEll(split.RowVars(), q),
+    LogRate: titan.DefaultLogRate,
+    Queries: q,
+    Regime:  titan.Capacity,
+}
+fs, err := titan.NewFieldSetupWithSplit(split, gens, nil, cfg)
+```
+
+**Partly custom setups.** The two constructors also take the mixed cases. Each part
+left at its default follows the canonical rule for that part:
+
+- `NewFieldSetup(m, gens, nil, cfg)` with a non-zero `cfg` takes the balanced split
+  and your fold.
+- `NewFieldSetupWithSplit(split, gens, nil, FoldConfig{})` takes your split and the
+  canonical fold on its row half. That needs an even `m'`.
+
+### 2.4 Soundness parameters
+
+`DefaultSecurityBits = 128`, `DefaultLogRate = 3` (`ρ = 1/8`). The query count is
+`QueryCount(λ, LogRate, regime)`:
+
+- **`Capacity`**, the default, gives `⌈128/3⌉ = 43` queries (42 would give only 126
+  bits). It is the conjectured bound, and the one the reference implementation and the
+  paper's cost analysis use.
+- **`Johnson`** gives 86 queries at the same target. It is the provable bound: a caller
+  that needs one should set it explicitly.
+
+`FoldConfig.SecurityBits()` is the inverse of `QueryCount`, so a caller who sets
+`Queries` by hand can see what the choice buys.
+
+The reference implementation uses 70 queries. That count accounts for the Johnson
+radius together with folding the CSP leg. This package does not fold the CSP leg, so
+the number does not apply here.
+
+### 2.5 Choosing a custom configuration
+
+**Split 1** trades the column side against the row side:
+
+| | smaller `M1` | larger `M1` |
+|---|---|---|
+| CSP inner product | cheaper | more expensive |
+| Pedersen generators needed | fewer | more |
+| row MSM length | shorter | longer |
+| group multilinear `G`, domain, FFT | **larger** | smaller |
+
+The canonical `M1 = m/2` keeps the column half as small as a balanced split allows,
+because this package does not fold the CSP leg, so every column variable costs a
+linear amount. The Rust reference folds that leg and so uses `m/2 − 2`.
+
+**Split 2** trades the two parts of the proof. The proof carries `Queries` cosets of
+`2^Ell` points plus `2^(m' − Ell)` reduced coefficients, so its size is roughly
+`Queries·2^Ell + 2^(m' − Ell)`. `DefaultEll(m', Queries)` minimises this over
+`1 ≤ Ell ≤ m'/2`. Because of the `Queries` factor, the optimum is well below `m'/2`:
+it is 1 up to `m' = 8`, 3 at `m' = 12`, and 5 at `m' = 16`. A larger `Ell` shrinks
+the reduced polynomial, and with it the verifier's work, at the cost of a larger proof.
+
+---
+
+## 3. Field scheme
+
+### 3.1 Setup
 
 ```go
 func NewFieldSetup(numVars int, gens []bls12381.G1Affine, curve *mathlib.Curve, cfg FoldConfig) (*FieldSetup, error)
@@ -52,48 +210,42 @@ func (s *FieldSetup) NumVars() int
 func (s *FieldSetup) FoldConfig() FoldConfig
 ```
 
-`NewFieldSetup` uses the balanced matrix split (`M1 = m/2`).
-`NewFieldSetupWithSplit` takes the cut from the caller; see [§5](#5-the-matrix-split).
+See [§2](#2-configuration-canonical-or-custom) for which constructor and `cfg` to use.
 
-- `gens` must hold at least `split.Cols()` = `2^M1` Pedersen generators. Extra
-  generators are ignored, not an error.
-- `curve` may be `nil`, meaning "the curve matching this package's types". It is used
-  for the Fiat–Shamir transcript and for leg 2.
-- `cfg` may be the zero `FoldConfig`, meaning `DefaultFoldConfig` — 128 bits under the
-  capacity bound. Note that `cfg` is validated against `split.RowVars()`, not
-  `numVars`, because the fold runs over the row half only.
+- `gens` must hold at least `2^M1` Pedersen generators. Surplus generators are ignored.
+- `curve` may be `nil`, which means the curve matching this package's types. It is
+  used for the Fiat–Shamir transcript and the CSP inner product.
 
-A setup is the shared public parameter. **Prover and verifier must hold the same
-one**: the split is recorded in the commitment and cross-checked, so mismatched setups
-are rejected rather than silently proving different polynomials.
+A setup is the shared public parameter, and **the prover and the verifier must hold the
+same one**. The commitment records `M1`, and the verifier rejects a commitment made
+under a different split.
 
-### 2.2 Statement and witness
+### 3.2 Statement and witness
 
 ```go
-type FieldStatement struct { Alpha []fr.Element }   // len == setup.NumVars()
-type FieldWitness   struct { Poly  sumcheck.FieldPoly } // len == 1 << setup.NumVars()
+type FieldStatement struct { Alpha []fr.Element }       // len == setup.NumVars() == m
+type FieldWitness   struct { Poly  sumcheck.FieldPoly } // len == 1 << m
 ```
 
-`Alpha` has one coordinate per variable of `f` — `setup.NumVars()` of them, **not**
-`Commitment.NumVars`, which counts only the row half.
-
-### 2.3 Prover
+### 3.3 Prover
 
 ```go
 func NewFieldProver(setup *FieldSetup, st FieldStatement, w FieldWitness) (*FieldProver, error)
 func (p *FieldProver) Commitment() *Commitment
 func (p *FieldProver) Prove() (*EvalProof, fr.Element, error)
+func (p *FieldProver) ProveAt(alpha []fr.Element) (*EvalProof, fr.Element, error)
 ```
 
-`NewFieldProver` commits — it runs the row MSMs, derives `G`, encodes it and builds
-both Merkle trees — so `Commitment()` is available before `Prove()` is called. That
-ordering is the point: a commitment must be fixed before `Alpha` would be chosen by a
-real Fiat–Shamir chain.
+`NewFieldProver` commits: it runs the row MSMs, encodes `G`, and builds the Merkle tree
+over the coset oracle. So `Commitment()` is available before any proof, and the
+commitment can be bound into a transcript before the evaluation point is drawn.
 
-`Prove()` returns the proof and `σ = f̃(α)`. The value is returned rather than taken as
-an input so the prover cannot be asked to prove a claim it did not compute.
+`Prove()` opens at `st.Alpha`. It returns the proof and `σ = f̃(α)`, and it computes
+`σ` itself rather than taking it as an input. `ProveAt(alpha)` opens the same
+commitment at another point. The caller must draw that point from its transcript
+**after** binding the commitment.
 
-### 2.4 Verifier
+### 3.4 Verifier
 
 ```go
 func NewFieldVerifier(setup *FieldSetup, st FieldStatement, com *Commitment) (*FieldVerifier, error)
@@ -101,12 +253,11 @@ func (v *FieldVerifier) Verify(proof *EvalProof, sigma fr.Element) int      // 1
 func (v *FieldVerifier) VerifyErr(proof *EvalProof, sigma fr.Element) error // nil = accept
 ```
 
-`Verify` returns `int` to match the convention in the surrounding zkatdlog code.
-`VerifyErr` is the same check reporting *why* it failed, against the sentinels in
-[§7](#7-sentinel-errors). Use `VerifyErr` in tests and when diagnosing; use `Verify`
-at call sites that only need the bit.
+`VerifyErr` runs the same check as `Verify` and reports why it failed, using the
+sentinels in [§6](#6-sentinel-errors). `Verify` returns an `int`, the convention in the
+surrounding zkatdlog code.
 
-### 2.5 Worked example
+### 3.5 Worked example
 
 ```go
 import (
@@ -114,7 +265,7 @@ import (
     "github.com/hyperledger-labs/fabric-smart-client/pkg/utils/errors"
 )
 
-const m = 8 // see section 6 for which m are usable
+const m = 8 // canonical: m divisible by 4, m >= 8
 
 setup, err := titan.NewFieldSetup(m, gens, nil, titan.FoldConfig{})
 if err != nil {
@@ -146,10 +297,10 @@ if err := verifier.VerifyErr(proof, sigma); err != nil {
 
 ---
 
-## 3. Group scheme
+## 4. Group scheme
 
-Identical in shape, without the matrix split — a group multilinear has no rows to
-commit, so it is encoded directly.
+The group scheme has the same shape as the field scheme, but no matrix split and no
+generators: the committed object already consists of group elements.
 
 ```go
 func NewGroupSetup(numVars int, curve *mathlib.Curve, cfg FoldConfig) (*GroupSetup, error)
@@ -162,220 +313,81 @@ type GroupWitness   struct { Poly  sumcheck.GroupPoly }
 func NewGroupProver(setup *GroupSetup, st GroupStatement, w GroupWitness) (*GroupProver, error)
 func (p *GroupProver) Commitment() *Commitment
 func (p *GroupProver) Prove() (*GroupEvalProof, bls12381.G1Affine, error)
+func (p *GroupProver) ProveAt(alpha []fr.Element) (*GroupEvalProof, bls12381.G1Affine, error)
 
 func NewGroupVerifier(setup *GroupSetup, st GroupStatement, com *Commitment) (*GroupVerifier, error)
 func (v *GroupVerifier) Verify(proof *GroupEvalProof, sigma *bls12381.G1Affine) int
 func (v *GroupVerifier) VerifyErr(proof *GroupEvalProof, sigma *bls12381.G1Affine) error
 ```
 
-There are no generators: the committed object is already group elements. `numVars`
-must be **even** (the fold halves it), so the floor is `m = 4` rather than the field
-scheme's `m = 8`.
+The canonical configuration takes even `m ≥ 4`. A custom `FoldConfig` takes any `m`
+with `m − Ell ≥ 3` at the default rate and query count ([§2](#2-configuration-canonical-or-custom)).
 
 ---
 
-## 4. Commitment
+## 5. Commitment
 
 ```go
 type Commitment struct {
-    Root      []byte            // RESERVED, always nil — see below
-    NumVars   int               // variables of G — for a field commitment, log2(rows), NOT m
-    LogDomain int               // log2 |L|
-    K         int               // coset dimension: 2^K points per leaf
-    NumLeaves int               // |L| / 2^K
-    ColVars   int               // M1 of the matrix split; 0 for a group commitment
-    Cosets    *CosetCommitment  // the oracle the fold queries; nil if committed without one
+    Root      []byte           // unused, always nil
+    NumVars   int              // m': variables of the group multilinear G
+    LogDomain int              // log2 |L| = m' + LogRate
+    K         int              // Ell: 2^K points per Merkle leaf
+    NumLeaves int              // |L| / 2^K
+    ColVars   int              // M1 for a field commitment, 0 for a group commitment
+    Cosets    *CosetCommitment // the Merkle root the opening is checked against
 }
 ```
 
-Two fields deserve attention.
+A caller only passes the commitment from the prover to the verifier. Three fields can
+mislead when read directly:
 
-**`NumVars` is not `m`.** For a field commitment it is `log2` of the matrix row count,
-i.e. `RowVars`. A caller that wants `m` reads it from the statement or the setup.
-
-**`ColVars` is wire state, and `0` means "not stated".** `NumVars` pins down `RowVars`
-and nothing else — a commitment with `NumVars = 4` is consistent with every `M1`. So
-the split has to travel with the commitment, or a prover and verifier cutting the
-matrix in different places could not be detected. Group commitments leave it `0`, as
-does a field commitment serialized before the field existed; the verifier treats `0`
-as "fall back to the balanced split", so such a commitment still verifies exactly as
-it did.
-
-**`Root` is always nil, and is reserved.** There is exactly one root that matters,
-`Cosets.Root`, over the coset-wise oracle whose leaves are `{G(b, powers(y))}`. The
-flat codeword — full power-curve points — used to be Merkle-committed too, but nothing
-ever verified against that root: the folding phase is the only stage that opens the
-oracle, and it opens cosets. So the tree was built and hashed for no verifier, and is
-no longer computed.
-
-The field is kept, nil, rather than removed, to reserve the name. Leaving it
-*populated* would have been the worst option: an exported `[]byte` called `Root`
-invites a future batching or serialization layer to `VerifyMerkleProof` against it,
-which would pass while binding nothing the protocol relies on. Nil makes that misuse
-fail at once instead of silently.
+- **`NumVars` is `m'`, not `m`.** For a field commitment it counts the rows' variables
+  only. `m` comes from the setup or the statement.
+- **`ColVars` records split 1.** The verifier checks it against its own setup and
+  rejects a mismatch. `0` on a field commitment is read as the balanced split.
+- **`Root` is unused.** The one root that binds the polynomial is `Cosets.Root`. `Root`
+  is kept as a nil placeholder, so any code that tries to verify against it fails at
+  once.
 
 ---
 
-## 5. The matrix split
+## 6. Sentinel errors
 
-```go
-type Split struct { M, M1 int }
+All sentinels are in `errors.go`; match them with `errors.Is`. These are the ones a
+caller of the PCS interface will see:
 
-func DefaultMatrixSplit(m int) Split   // Split{M: m, M1: m / 2}
-
-func (s Split) RowVars() int            // M - M1  — sizes the fold and the domain
-func (s Split) ColVars() int            // M1      — leg 2 runs over these
-func (s Split) Rows() int               // 1 << RowVars()
-func (s Split) Cols() int               // 1 << M1  — the generator count
-
-func (s Split) Validate() error         // commit-time contract
-func (s Split) ValidateForFold() error  // Validate + even row half
-```
-
-The field construction reads `f` as a `2^RowVars × 2^M1` matrix. Moving the cut trades
-one leg against the other:
-
-| | smaller `M1` | larger `M1` |
-|---|---|---|
-| leg 2 (CSP inner product) | cheaper | more expensive |
-| Pedersen generators needed | fewer | more |
-| row MSM length | shorter | longer |
-| evaluation domain / FFT | **larger** | smaller |
-
-The default is `m/2`. The Rust reference uses `m/2 − 2` because it also folds the
-generator oracle, so a larger column half is cheap there; this package does not fold
-leg 2 yet, so every extra column variable is paid in full as linear CSP cost. Revisit
-the default when leg-2 folding lands — it is a consequence of what is implemented, not
-a disagreement with the reference.
-
-### 5.1 Two validators, deliberately
-
-`Validate` is the **commit-time** contract: `M > 0`, and `M1` leaves a whole number of
-variables on each side. That is all a matrix needs.
-
-`ValidateForFold` adds the rule the coset layout needs: an **even row half**.
-
-They are separate on purpose. Committing at an odd row half is perfectly well defined
-— it produces `2^RowVars` Pedersen commitments like any other shape — and folding out
-of a commitment is a property of the `FoldConfig` attached later, not of the
-commitment. An earlier draft conflated them and broke every odd-`m` and `m = 2` case
-in the package at once. Callers that attach a fold want `ValidateForFold`; callers that
-only commit want `Validate`.
-
----
-
-## 6. Which sizes are usable
-
-Three independent constraints. Only the first depends on the split.
-
-**1. Even row half** (`ValidateForFold`). Under the *balanced* split
-`RowVars = m − m/2`, which is even exactly when `m mod 4 ∈ {0, 3}`:
-
-| `m mod 4` | `RowVars` | balanced split foldable? |
-|---|---|---|
-| 0 | `m/2`, even | yes — 4, 8, 12, … |
-| 3 | `(m+1)/2`, even | yes — 3, 7, 11, … |
-| 1 | `(m+1)/2`, odd | no |
-| 2 | `m/2`, odd | no |
-
-This is a property of the *balanced split*, not of the scheme. `NewFieldSetupWithSplit`
-lifts it: `m = 10` at `M1 = 4` has a row half of 6 and folds fine.
-
-**2. Drawability** (`FoldConfig.Validate`). The consistency queries are *distinct*
-indices into the folded domain, so `Queries ≤ NumCosets(rowVars) = 2^(rowVars − Ell + LogRate)`.
-At the default 43 queries this is what actually blocks the small odd sizes: `m = 3, 7,
-11` pass the parity rule and fail here.
-
-**3. The practical floors.** Field scheme: `m = 8`. Group scheme: `m = 4`.
-
-Sizes rejected by `NewFieldSetup` for parity alone — `m = 6, 10, 14, 18` — are usable
-via `NewFieldSetupWithSplit`; `m = 18` at `M1 = 8` is where the Rust reference's own
-config table starts.
-
----
-
-## 7. Fold configuration and soundness
-
-```go
-type FoldConfig struct {
-    Ell     int              // folding rounds
-    LogRate int              // rho = 2^-LogRate
-    Queries int              // consistency queries — this is the security parameter
-    Regime  SoundnessRegime  // Capacity (default) or Johnson
-}
-
-func DefaultFoldConfig(m int) (FoldConfig, error)
-func DefaultEll(m, queries int) int
-func QueryCount(lambda, logRate int, regime SoundnessRegime) (int, error)
-
-func (c FoldConfig) Validate(m int) error
-func (c FoldConfig) SecurityBits() int
-func (c FoldConfig) NumCosets(m int) int  // 1 << (m - Ell + LogRate)
-func (c FoldConfig) CosetSize() int       // 1 << Ell
-```
-
-Defaults: `DefaultSecurityBits = 128`, `DefaultLogRate = 3` (so `ρ = 1/8`), `Regime =
-Capacity`. Under the capacity bound `Q = ⌈λ / log₂(1/ρ)⌉ = ⌈128/3⌉ = **43**`. Note 42
-would give only 126 bits.
-
-**`Capacity` is conjectured; `Johnson` is what is provable.** Johnson costs twice the
-queries (86 at the same target). The default is `Capacity` because that is what the
-reference implementation and the paper's cost analysis assume, but a caller who needs
-a provable bound should set `Johnson` explicitly.
-
-`DefaultEll` minimizes proof size: the proof carries `Queries` cosets of `2^Ell` points
-plus the reduced polynomial's `2^(m−Ell)` coefficients, so it minimizes
-`Queries·2^Ell + 2^(m−Ell)`. Because the coset term carries the `Queries` factor, the
-optimum sits **below** the paper's `m/2 − 1` — at `m = 12` it is 3, not 5. `Ell` is a
-field rather than a constant so a caller who wants the paper's value can set it.
-
-`SecurityBits()` is the inverse of `QueryCount`: a caller who sets `Queries` by hand
-can use it to see what that bought.
-
-> **Out of scope:** the reference implementation uses 70 queries. That is Johnson's
-> radius plus the soundness error of folding the CSP leg — neither of which applies
-> here, since this package does not fold leg 2. The difference is not a discrepancy to
-> reconcile.
-
----
-
-## 8. Sentinel errors
-
-All in `errors.go`; match with `errors.Is`. The ones a caller of the PCS interface
-will actually see:
-
-| sentinel | means |
+| sentinel | meaning |
 |---|---|
-| `ErrInvalidMatrixSplit` | column half outside `[1, m-1]`, or an odd row half where the fold needs even |
-| `ErrInvalidFoldConfig` | `Ell` outside `[1, m/2]`, odd `m`, non-positive rate/queries, or queries not drawable |
-| `ErrInsufficientGenerators` | fewer than `2^M1` Pedersen generators supplied |
+| `ErrInvalidMatrixSplit` | split 1 is invalid: `m ≤ 0`, or `M1` is outside `[1, m − 1]` |
+| `ErrInvalidFoldConfig` | the canonical configuration was asked for a size it does not cover, or a custom `FoldConfig` failed a check in [§2.3](#23-custom-configuration) |
+| `ErrInsufficientGenerators` | fewer than `2^M1` Pedersen generators |
 | `ErrNumVarsMismatch` | `Alpha`, the polynomial and the setup disagree on the variable count |
-| `ErrQueryCountMismatch` | the proof does not carry the configured number of queries — accepting fewer would lower soundness below its stated level |
-| `ErrCosetOpeningInvalid` | **a consistency query failed** — the coset is not under the root, or does not fold to the reduced codeword. This is the error that catches a prover who committed to one polynomial and folded another |
-| `ErrReducedClaimMismatch` | the folding is internally consistent but opens to the wrong value |
+| `ErrQueryCountMismatch` | the proof does not carry the configured number of queries |
+| `ErrCosetOpeningInvalid` | **a consistency query failed**: the coset is not under the root, or does not fold to the reduced polynomial. This is the error that catches a prover who committed to one polynomial and folded another |
+| `ErrReducedClaimMismatch` | the folding is consistent but opens to the wrong value |
 | `ErrReducedPolyMismatch` | the reduced polynomial has the wrong length |
 | `ErrFoldRoundMismatch` | wrong round count, or a round message inconsistent with the previous claim |
-| `ErrRoundCheckFailed`, `ErrSumMismatch` | sum-check round inconsistency |
-| `ErrDomainTooLarge` | domain exceeds BLS12-381 Fr's two-adicity of `2^32` |
+| `ErrRoundCheckFailed`, `ErrSumMismatch` | a sum-check round is inconsistent |
+| `ErrDomainTooLarge` | the domain exceeds BLS12-381 Fr's two-adicity of `2^32` |
 
-`ErrInvalidSplit` (the sum-check prover's `ell`) and `ErrInvalidMatrixSplit` (the
-matrix cut) are distinct sentinels because they fail for unrelated reasons.
+`ErrInvalidSplit` belongs to the group sum-check's internal split, not to either split
+in [§2](#2-configuration-canonical-or-custom). A caller of the PCS does not see it.
 
 ---
 
-## 9. What this interface does not yet offer
+## 7. What this interface does not yet offer
 
 Deliberate omissions, each with a reason:
 
 - **No `Setup` / trusted-setup ceremony.** Generators are passed in.
 - **No serialization.** `Commitment`, `EvalProof` and `GroupEvalProof` are Go structs;
-  there is no wire encoding yet. `ColVars` is described as "on the wire" in the sense
-  that it is part of the commitment's *content* and is checked — not that a codec
-  exists.
-- **No batch opening.** One `Alpha` per proof.
+  there is no wire encoding yet.
+- **No batch opening.** One point per proof (`ProveAt` can open one commitment at
+  several points, one proof each).
 - **No zero-knowledge.** The proof reveals `Queries` cosets of the oracle and the
   reduced polynomial in plain. Titan is a commitment scheme here, not a ZK argument.
 - **Not WHIR proper.** The reduced polynomial is sent in plain rather than recursed on,
   so the verifier is `O(2^(m−Ell))` rather than polylogarithmic.
 - **No `O(n^¼)`.** That needs a second folding layer over the *generator* oracle — the
-  reference's `l2`. Its absence is why `M1` defaults to `m/2` rather than `m/2 − 2`.
+  reference's `l2`. Its absence is why the canonical `M1` is `m/2` rather than `m/2 − 2`.
