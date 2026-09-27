@@ -23,8 +23,8 @@ The sum-check protocol reduces a claim about a sum over the boolean hypercube to
 claim about a single evaluation at a random point. It is the standard engine behind
 succinct arguments built on multilinear polynomials, and it is what makes those
 arguments cheap to verify: the prover does work proportional to the hypercube size
-`2^mu`, while the verifier does work proportional only to the number of variables
-`mu`.
+$`2^{\mu}`$, while the verifier does work proportional only to the number of variables
+$`\mu`$.
 
 This package implements sum-check in two flavours over the same code path:
 
@@ -53,15 +53,15 @@ or a direct evaluation. See [Security Considerations](#7-security-considerations
 
 A claim is a product of multilinear polynomials on the same number of variables:
 
-```
-p(X_1, ..., X_mu) = f_1(X) * f_2(X) * ... * f_k(X) * g_1(X)
+```math
+p(X_1, \ldots, X_{\mu}) = f_1(X) \cdot f_2(X) \cdots f_k(X) \cdot g_1(X)
 ```
 
-with `k >= 0` field factors and **at most one** group factor `g_1`. The protocol
+with $`k \ge 0`$ field factors and **at most one** group factor $`g_1`$. The protocol
 proves the value of
 
-```
-S = sum over x in {0,1}^mu of p(x)
+```math
+S = \sum_{x \in \{0,1\}^{\mu}} p(x)
 ```
 
 ### 2.1 Why At Most One Group Factor
@@ -73,16 +73,16 @@ so a second group factor cannot be expressed in the API.
 
 ### 2.2 Representation
 
-A multilinear polynomial on `mu` variables is represented by its `2^mu` evaluations
-on the hypercube, indexed **little-endian**: entry `i` holds
-`p(b_0, ..., b_(mu-1))` where `b_j` is bit `j` of `i`. So `b_0` is the low index bit
-and `b_(mu-1)` the high one.
+A multilinear polynomial on $`\mu`$ variables is represented by its $`2^{\mu}`$ evaluations
+on the hypercube, indexed **little-endian**: entry $`i`$ holds
+$`p(b_0, \ldots, b_{\mu-1})`$ where $`b_j`$ is bit $`j`$ of $`i`$. So $`b_0`$ is the low index bit
+and $`b_{\mu-1}`$ the high one.
 
 This convention determines the folding pairing, and the two must be kept in step.
-Because `b_(mu-1)` is the high bit, its two slices are the bottom and top halves of
-the table, so folding pairs entry `i` with entry `i + half` and substitutes for the
+Because $`b_{\mu-1}`$ is the high bit, its two slices are the bottom and top halves of
+the table, so folding pairs entry $`i`$ with entry `i + half` and substitutes for the
 **last** variable. Under the opposite (big-endian) convention the first variable
-would be the high bit and folding would instead pair `2i` with `2i+1`. Choosing the
+would be the high bit and folding would instead pair `2i` with $`2i+1`$. Choosing the
 pairing that does not match the layout silently sums a different polynomial — and it
 is invisible to round-trip tests, since prover and verifier fold identically and the
 mistake cancels between them. `TestFoldSubstitutesLastVariable` pins it down.
@@ -100,9 +100,8 @@ The evaluation table length must be a power of two; `NewFieldPoly` and
 Each factor is multilinear, so it is degree 1 in the round variable and the product
 has degree equal to the number of factors:
 
-```
-degree = k + 1   (with a group factor)
-degree = k       (field only)
+```math
+\mathrm{degree} = \begin{cases} k + 1 & \text{with a group factor} \\ k & \text{field only} \end{cases}
 ```
 
 Each round therefore sends `degree + 1` evaluations, which is exactly enough to
@@ -112,35 +111,35 @@ determine a univariate polynomial of that degree.
 
 For each variable in turn, the prover sends the univariate round polynomial
 
-```
-q_j(t) = sum over x in {0,1}^(mu-j) of p(x, t, r_(j-1), ..., r_1)
+```math
+q_j(t) = \sum_{x \in \{0,1\}^{\mu-j}} p(x, t, r_{j-1}, \ldots, r_1)
 ```
 
 (variables are consumed from the last position inward, per
-[section 2.2](#22-representation); `r_1` is the challenge from round 1.)
+[section 2.2](#22-representation); $`r_1`$ is the challenge from round 1.)
 
-evaluated at `t = 0, 1, ..., degree`. The verifier checks
+evaluated at $`t = 0, 1, \ldots, \mathrm{degree}`$. The verifier checks
 
-```
-q_j(0) + q_j(1) == expected
+```math
+q_j(0) + q_j(1) = \mathit{expected}
 ```
 
 where `expected` is the asserted total in round 0 and the previous round polynomial
 interpolated at the previous challenge thereafter. It then draws the next challenge
-`r_j` from the transcript and sets `expected = q_j(r_j)`.
+$`r_j`$ from the transcript and sets `expected = q_j(r_j)`.
 
-After `mu` rounds, `expected` holds the residual claim: the value of `p` at the
+After $`\mu`$ rounds, `expected` holds the residual claim: the value of $`p`$ at the
 challenge point. Rounds consume variables from the last to the first, so the
 challenges come out in reverse table order — call this **folding order**, as opposed
-to the **table order** (`b_0` first) the evaluation table is laid out in.
+to the **table order** ($`b_0`$ first) the evaluation table is laid out in.
 
-An `Opening`'s `R` is in folding order. Both orders are useful, so evaluation is
+An `Opening`'s $`R`$ is in folding order. Both orders are useful, so evaluation is
 exposed as two methods rather than one taking an implicit convention:
 
 | Method | Argument order | Use when |
 |--------|----------------|----------|
-| `EvaluateOpening(at)` | folding: `at[0]` is `b_(mu-1)` | the point came from an `Opening`'s `R`; passed straight through |
-| `EvaluatePoint(at)` | table: `at[0]` is `b_0` | the caller thinks in the polynomial's own variables; reversed internally |
+| `EvaluateOpening(at)` | folding: `at[0]` is $`b_{\mu-1}`$ | the point came from an `Opening`'s $`R`$; passed straight through |
+| `EvaluatePoint(at)` | table: `at[0]` is $`b_0`$ | the caller thinks in the polynomial's own variables; reversed internally |
 
 The two differ only in argument order, and each names the convention it means at the
 call site. Getting this wrong is silent — the wrong value comes back with no
@@ -151,21 +150,21 @@ error — which is why there is no single `Evaluate`.
 Between rounds the prover folds every factor at the challenge, using the multilinear
 identity
 
-```
-p(x, r) = p(x, 0) + r * (p(x, 1) - p(x, 0))
+```math
+p(x, r) = p(x, 0) + r \cdot \bigl(p(x, 1) - p(x, 0)\bigr)
 ```
 
 which costs one multiplication per surviving entry rather than two, and halves the
-table each round. Total prover work across all rounds is therefore `O(2^mu)`, not
-`O(mu * 2^mu)`.
+table each round. Total prover work across all rounds is therefore $`O(2^{\mu})`$, not
+$`O(\mu \cdot 2^{\mu})`$.
 
 ### 3.2 Stepping t Without Multiplication
 
-Because each factor is multilinear in the round variable, `f_i(t, x)` is the straight
-line through `f_i(0, x)` and `f_i(1, x)`. Stepping `t = 0, 1, 2, ...` needs only
+Because each factor is multilinear in the round variable, $`f_i(t, x)`$ is the straight
+line through $`f_i(0, x)`$ and $`f_i(1, x)`$. Stepping $`t = 0, 1, 2, \ldots`$ needs only
 repeated addition of the slope, so the only multiplications per evaluation point are
 the ones forming the product itself. The same trick applies on the group side, where
-stepping `t` costs one curve addition rather than a scalar multiplication.
+stepping $`t`$ costs one curve addition rather than a scalar multiplication.
 
 ## 4. API
 
@@ -220,14 +219,14 @@ if err != nil {
 
 ### 4.4 The Opening
 
-`Opening` is the residual claim at the challenge point `R`. The prover and the
+`Opening` is the residual claim at the challenge point $`R`$. The prover and the
 verifier learn different things, so they populate different fields:
 
 | Field | Set by `Prove` | Set by `Verify` |
 |-------|----------------|-----------------|
-| `R` | ✅ challenge point | ✅ same point |
-| `FieldEvals` | ✅ each `f_i(R)` | ❌ nil |
-| `GroupEval` | ✅ `g_1(R)` | ✅ the full product `p(R)` (group claims) |
+| $`R`$ | ✅ challenge point | ✅ same point |
+| `FieldEvals` | ✅ each $`f_i(R)`$ | ❌ nil |
+| `GroupEval` | ✅ $`g_1(R)`$ | ✅ the full product `p(R)` (group claims) |
 | `Product` | ❌ nil | ✅ `p(R)` (field-only claims) |
 
 The asymmetry is inherent: the verifier derives the single value the rounds
@@ -261,12 +260,12 @@ a transcript in an identical state, or every challenge diverges.
 A `Claim` is one product. A protocol that needs a polynomial `Phi(h_1, ..., h_p)` of
 several multilinears — a sum of structurally different products with public
 coefficients — uses `MultiClaim`. It is the wrapper that lifts sum-check from one
-product to `Phi` of several polynomials, and it is what the
+product to $`\Phi`$ of several polynomials, and it is what the
 [pivot protocol](pivot.md) uses for its field constraint and its sparse-product
 check.
 
-```
-H = Σ_{x ∈ {0,1}^mu}  Σ_j  c_j · Π_{i ∈ S_j} h_i(x)
+```math
+H = \sum_{x \in \{0,1\}^{\mu}} \sum_j c_j \prod_{i \in S_j} h_i(x)
 ```
 
 #### 4.6.1 Types
@@ -297,7 +296,7 @@ type MultiShape struct {
 | `(*MultiClaim).NumVars() int` | the number of variables shared by the pool |
 | `(*MultiClaim).Degree() int` | the round degree: the largest `len(Factors)` of any term |
 | `(*MultiClaim).Shape() MultiShape` | `{NumVars, Degree}`, to hand to the verifier |
-| `(*MultiClaim).Evaluate(evals []fr.Element) (fr.Element, error)` | `Phi` at the pool values `evals` |
+| `(*MultiClaim).Evaluate(evals []fr.Element) (fr.Element, error)` | $`\Phi`$ at the pool values `evals` |
 | `EvaluateTerms(terms []Term, evals []fr.Element) (fr.Element, error)` | the same, for a verifier that holds the terms but not the pool |
 
 #### 4.6.2 Proving and verifying
@@ -316,19 +315,19 @@ so the caller's tables are not modified.
 
 | `Opening` field | Set by `ProveMulti` | Set by `VerifyMulti` |
 |---|---|---|
-| `R` | ✅ challenge point, folding order | ✅ same point |
-| `FieldEvals` | ✅ one value per **pool** entry, `h_i(R)` | ❌ nil |
+| $`R`$ | ✅ challenge point, folding order | ✅ same point |
+| `FieldEvals` | ✅ one value per **pool** entry, $`h_i(R)`$ | ❌ nil |
 | `Product` | ❌ nil | ✅ `p(R) = Phi(h_1(R), …)` |
 
 A nil error from `VerifyMulti` means only that the sum follows from the residual
-claim. The caller closes it by obtaining the pool values at `R` — from a commitment
+claim. The caller closes it by obtaining the pool values at $`R`$ — from a commitment
 opening, or directly — and checking
 `EvaluateTerms(terms, values) == opening.Product`.
 
 #### 4.6.3 Example
 
 `ExampleProveMulti` (in `multi_example_test.go`, run by `go test`) proves
-`Φ(h0, h1) = 2·h0·h1 − h1²` over two variables:
+$`\Phi(h_0, h_1) = 2 h_0 h_1 - h_1^2`$ over two variables:
 
 ```go
 claim := &sumcheck.MultiClaim{
@@ -350,7 +349,7 @@ ok := phi.Equal(productOf(opening))             // opening.Product as fr.Element
 #### 4.6.4 Rules and errors
 
 - **Structure:** at least one pool polynomial and one term, and every pool
-  polynomial with the same number of variables (≥ 1) and a power-of-two table.
+  polynomial with the same number of variables (at least one) and a power-of-two table.
   Violations return `ErrNoFactors`, `ErrNumVarsMismatch` or `ErrNotPowerOfTwo`.
 - **Terms:** every term has at least one factor (`ErrNoFactors`), and every index is
   in range (`ErrFactorIndex`). A constant term can be written with a factor that is
@@ -402,7 +401,7 @@ Measured on BLS12-381 for a 4096-entry table:
 | Full log-n fold sequence | 383 µs | 182 µs | **`fr` wins by 2.1×** |
 
 The lesson is the shape of the access pattern, not the primitive: a single pass does
-not amortize the conversion, whereas sum-check's `mu` successive folds over a
+not amortize the conversion, whereas sum-check's $`\mu`$ successive folds over a
 shrinking table do. Callers should build a `FieldPoly`/`GroupPoly` **once** and hold
 it across calls rather than reconstructing it per proof.
 
@@ -413,7 +412,7 @@ Isolating the operations in a 190 ms group fold:
 | Operation | Cost | Share |
 |-----------|------|-------|
 | Scalar multiplications | 161 ms | ~85% |
-| `n-1` Jacobian additions | 1.17 ms | ~0.6% |
+| $`n-1`$ Jacobian additions | 1.17 ms | ~0.6% |
 
 Additions are ~137× cheaper than scalar multiplications, so the group design
 minimizes scalar multiplications first; Jacobian-vs-affine representation tuning is
@@ -443,9 +442,9 @@ residual evaluation can prove any sum it likes.
 The caller **must** close the argument by checking the returned evaluation against
 something the prover could not choose freely:
 
-- a polynomial commitment opening at `R`;
+- a polynomial commitment opening at $`R`$;
 - an oracle query, in an interactive or idealized setting; or
-- a direct evaluation of the original polynomials at `R`, where the verifier holds
+- a direct evaluation of the original polynomials at $`R`$, where the verifier holds
   them.
 
 Omitting this step leaves no soundness at all. This is a property of the protocol,
@@ -453,9 +452,9 @@ not a limitation of the implementation.
 
 ### 7.2 Soundness Error
 
-For a degree-`d` round polynomial over `mu` variables, a cheating prover's success
+For a degree-$`d`$ round polynomial over $`\mu`$ variables, a cheating prover's success
 probability is bounded by `mu * d / |F|`. With BLS12-381's ~255-bit scalar field this
-is negligible for any practical `mu` and `d`.
+is negligible for any practical $`\mu`$ and $`d`$.
 
 ### 7.3 Why Interpolation Is Not Optional
 
@@ -477,15 +476,15 @@ binding described in [section 5](#5-transcript-and-fiat-shamir).
 
 | File | Coverage |
 |------|----------|
-| `sumcheck_test.go` | round-trip for `k ∈ {0,1,2,3}` × `mu ∈ {1,2,3,6,8,10}`, brute-force sum cross-check, input-immutability, field-vs-group cross-check, transcript binding, folding-convention pinning (`TestFoldSubstitutesLastVariable`) |
+| `sumcheck_test.go` | round-trip for $`k \in \{0,1,2,3\}`$ × $`\mu \in \{1,2,3,6,8,10\}`$, brute-force sum cross-check, input-immutability, field-vs-group cross-check, transcript binding, folding-convention pinning (`TestFoldSubstitutesLastVariable`) |
 | `soundness_test.go` | wrong sum, tampered first/middle/final round, compensating tamper, dropped/extra/swapped round, wrong degree, nil elements, proof-under-wrong-shape, claim and shape validation |
 | `fuzz_test.go` | `FuzzVerify` (attacker-controlled proof bytes), `FuzzNewFieldPoly` (arbitrary evaluation tables) |
 
 Statement coverage is ~87%.
 
-`TestGroupMatchesFieldScaled` is the strongest cross-check: with `g(x) = [s(x)]G` for
-a multilinear `s`, the group claim `sum_x f(x)·g(x)` must equal
-`[sum_x f(x)·s(x)]G`. The two runs absorb different bytes and so draw different
+`TestGroupMatchesFieldScaled` is the strongest cross-check: with $`g(x) = [s(x)]\,G`$ for
+a multilinear $`s`$, the group claim $`\sum_x f(x) \cdot g(x)`$ must equal
+$`\bigl[\sum_x f(x) \cdot s(x)\bigr] G`$. The two runs absorb different bytes and so draw different
 challenges, which means the round polynomials cannot be compared directly — but the
 claimed sums must still agree once the field sum is scaled into G1. This catches
 errors in the group path that a same-path test would not.

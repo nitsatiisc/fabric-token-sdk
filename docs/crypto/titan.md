@@ -34,12 +34,12 @@ This page is the **implementation design record**: why the code is shaped the wa
 Titan is a multilinear polynomial commitment scheme (PCS) built in two tiers:
 
 1. **Pedersen-commit the matrix form of the witness.** A multilinear `ftilde` on
-   `m` variables with `n = 2^m` coefficients is viewed as a `q x q` matrix with
-   `q = 2^(m/2) = sqrt(n)`. Row `i` is Pedersen-committed to a single group
-   element `G_i = sum_j ftilde_i(<j>) * g_j`.
-2. **Commit the resulting group vector with a WHIR-style IOPP.** The `q` group
+   $`m`$ variables with $`n = 2^m`$ coefficients is viewed as a `q x q` matrix with
+   $`q = 2^{m/2} = \sqrt{n}`$. Row $`i`$ is Pedersen-committed to a single group
+   element $`G_i = \sum_j \tilde f_i(\langle j \rangle) \cdot g_j`$.
+2. **Commit the resulting group vector with a WHIR-style IOPP.** The $`q`$ group
    elements are interpolated into a *group* multilinear `Gtilde` with
-   `Gtilde(<i>) = G_i`, and `Gtilde` is committed by a Reed-Solomon IOPP that
+   $`\tilde G(\langle i \rangle) = G_i`$, and `Gtilde` is committed by a Reed-Solomon IOPP that
    works over group elements rather than field elements.
 
 The oracle for `Gtilde` *is* the commitment to `ftilde`.
@@ -54,8 +54,8 @@ group witnesses (see [sum-check](sumcheck.md), whose claims mix field and group
 factors), one scheme covering both avoids maintaining two.
 
 The two tiers also split the cost the way we want it: the expensive
-multi-exponentiation is `O(n)` once, in tier 1, and everything after it runs at
-`O(sqrt(n))`.
+multi-exponentiation is $`O(n)`$ once, in tier 1, and everything after it runs at
+$`O(\sqrt{n})`$.
 
 ## 3. The Univariate-Multilinear Correspondence
 
@@ -63,62 +63,62 @@ The IOPP is a univariate Reed-Solomon proximity test, but the committed object i
 multilinear. The two are joined by evaluating the multilinear along the *power
 curve*:
 
-```
-fhat(X) := ftilde(X, X^2, X^4, ..., X^(2^(m-1)))
+```math
+\hat f(X) := \tilde f\bigl(X, X^2, X^4, \ldots, X^{2^{m-1}}\bigr)
 ```
 
-`fhat` is univariate of degree at most `2^m - 1`, and the map `ftilde -> fhat` is
-injective: a multilinear monomial `prod_{j in S} X_j` maps to `X^(sum_{j in S} 2^j)`,
-and distinct subsets `S` give distinct binary numbers, so no two of the `2^m`
+`fhat` is univariate of degree at most $`2^m - 1`$, and the map $`\tilde f \to \hat f`$ is
+injective: a multilinear monomial `prod_{j in S} X_j` maps to $`X^{\sum_{j \in S} 2^j}`$,
+and distinct subsets $`S`$ give distinct binary numbers, so no two of the $`2^m`$
 coefficients collide. Committing `fhat` therefore commits `ftilde`.
 
-"Encoding the oracle" means evaluating `fhat` on every point of the domain `L`.
+"Encoding the oracle" means evaluating `fhat` on every point of the domain $`L`$.
 
 ## 4. Oracle Encoding
 
 Evaluating `fhat` pointwise would cost one multi-exponentiation per domain point.
-Instead the encoder runs a butterfly in `m` passes over the domain, using the
+Instead the encoder runs a butterfly in $`m`$ passes over the domain, using the
 multilinear identity in the leading variable
 
-```
-ftilde(x, x^2, ...) = ftilde(0, x^2, ...) + x * (ftilde(1, x^2, ...) - ftilde(0, x^2, ...))
+```math
+\tilde f(x, x^2, \ldots) = \tilde f(0, x^2, \ldots) + x \cdot \bigl(\tilde f(1, x^2, \ldots) - \tilde f(0, x^2, \ldots)\bigr)
 ```
 
 together with the fact that a smooth multiplicative subgroup is closed under
-squaring: `x` and `-x` square to the same value, so a single scalar
+squaring: $`x`$ and $`-x`$ square to the same value, so a single scalar
 multiplication `factor = (hi - lo) * x` yields **both** outputs, `lo + factor` at
-`x` and `lo - factor` at `-x`. That is the standard FFT butterfly, and it costs
+$`x`$ and `lo - factor` at $`-x`$. That is the standard FFT butterfly, and it costs
 
-```
-(n/2) * log n     scalar multiplications
+```math
+\frac{n}{2} \log n \quad \text{scalar multiplications}
 ```
 
-against roughly `n * log n` for forming the coefficients of `fhat` explicitly.
+against roughly $`n \log n`$ for forming the coefficients of `fhat` explicitly.
 
 ### 4.1 Two Details That Are Easy to Get Wrong
 
 **Bit-reversal comes first.** The butterfly consumes variables from the high bit
 of the index downwards, pairing the first pass with the highest power
-`x^(2^(m-1))`. But this repository indexes evaluation tables **little-endian** —
-entry `i` holds `p(b_0, ..., b_(m-1))` with `b_j` the `j`-th bit of `i`, so `b_0`
+$`x^{2^{m-1}}`$. But this repository indexes evaluation tables **little-endian** —
+entry $`i`$ holds $`p(b_0, \ldots, b_{m-1})`$ with $`b_j`$ the $`j`$-th bit of $`i`$, so $`b_0`$
 sits at the low bit (see [sum-check §2.2](sumcheck.md#22-representation)). A
 bit-reverse permutation before the butterfly relabels the variables in reverse, so
-that bit 0 holds `b_(m-1)` and the passes come out in the order the power curve
+that bit 0 holds $`b_{m-1}`$ and the passes come out in the order the power curve
 needs. Omitting it silently encodes a *different* polynomial —
-`TestEncodeFieldOracleMatchesNaive` fails at `m=2` without it.
+`TestEncodeFieldOracleMatchesNaive` fails at $`m = 2`$ without it.
 
 **The blow-up repeats, it does not zero-pad.** When the domain is larger than the
-message (`d > m`, which is what gives the code its rate and hence the IOPP its
-distance), each coefficient is repeated `2^(d-m)` times. Repetition is what makes
+message ($`d > m`$, which is what gives the code its rate and hence the IOPP its
+distance), each coefficient is repeated $`2^{d-m}`$ times. Repetition is what makes
 the first pass see a constant on each block, which is the degree-0 base case of
 the recursion. Zero-padding instead produces the wrong codeword.
 
 ## 5. The Evaluation Domain
 
-`Domain` is the multiplicative subgroup `L` of `Fr` of order `2^d`, materialized
+`Domain` is the multiplicative subgroup $`L`$ of `Fr` of order $`2^d`$, materialized
 as the full list of its elements in generator order (`Elements[i] = Generator^i`).
 The butterfly indexes this slice at power-of-two strides, so laying the elements
-out beats recomputing them; at the `O(sqrt(n))` sizes Titan encodes, the slice is
+out beats recomputing them; at the $`O(\sqrt{n})`$ sizes Titan encodes, the slice is
 negligible.
 
 `NewDomain` builds on `gnark-crypto`'s `fft.NewDomain` for the root of unity, then
@@ -132,35 +132,35 @@ enumerates the powers. `fft.NewDomain` *panics* past the field's two-adicity, so
 general sum-check primitive, and nothing here changes it. This one proves a single
 shape of claim, only for a group polynomial:
 
-```
-sum over x in {0,1}^m of eq(alpha, x) * f(x) = sigma        f in G[X], sigma in G
+```math
+\sum_{x \in \{0,1\}^m} \mathrm{eq}(\alpha, x) \cdot f(x) = \sigma, \qquad f \in \mathbb{G}[X],\ \sigma \in \mathbb{G}
 ```
 
-which is exactly an evaluation claim, `sigma = f(alpha)`. Titan's evaluation path
+which is exactly an evaluation claim, $`\sigma = f(\alpha)`$. Titan's evaluation path
 needs precisely this shape, and the specialisation is what buys the speedup. A caller
 with any other claim wants `crypto/sumcheck`.
 
 ### 6.1 Why It Is Faster
 
-Naive group sum-check costs `O(n)` group exponentiations. Here the `eq` factor is
+Naive group sum-check costs $`O(n)`$ group exponentiations. Here the $`\mathrm{eq}`$ factor is
 known in advance, so the prover can precompute partial sums over suffixes
 
-```
-S_i(b) = sum over x in {0,1}^(m-i) of h(b, x),     h(x) = eq(alpha, x) * f(x)
+```math
+S_i(b) = \sum_{x \in \{0,1\}^{m-i}} h(b, x), \qquad h(x) = \mathrm{eq}(\alpha, x) \cdot f(x)
 ```
 
-for every prefix `b` in `{0,1}^i`. Then:
+for every prefix $`b`$ in $`\{0,1\}^i`$. Then:
 
-- `S_ell` costs `2^ell` multi-exponentiations of size `2^(m-ell)`;
-- every lower table follows by `S_(i-1)(b) = S_i(b,0) + S_i(b,1)` — group
+- $`S_{\ell}`$ costs $`2^{\ell}`$ multi-exponentiations of size $`2^{m-\ell}`$;
+- every lower table follows by $`S_{i-1}(b) = S_i(b,0) + S_i(b,1)`$ — group
   **additions**, ~137× cheaper than scalar multiplications on this curve
   (see [sumcheck](sumcheck.md#62-scalar-multiplication-dominates-the-group-path));
-- rounds `i <= ell` read their message off `S_i` with MSMs of size `O(2^i)`;
+- rounds `i <= ell` read their message off $`S_i`$ with MSMs of size $`O(2^i)`$;
 - rounds past `ell` run the folklore method on a polynomial already down to
-  `O(sqrt(n))` entries.
+  $`O(\sqrt{n})`$ entries.
 
-With `ell = m/2` the total is `sqrt(n)` MSMs of size `sqrt(n)` plus `O(sqrt(n))`
-group exponentiations, against `O(n)` exponentiations naive.
+With $`\ell = m/2`$ the total is `sqrt(n)` MSMs of size `sqrt(n)` plus $`O(\sqrt{n})`$
+group exponentiations, against $`O(n)`$ exponentiations naive.
 
 ### 6.2 Variable Order Is the Opposite of `crypto/sumcheck`
 
@@ -168,15 +168,15 @@ This is the single most important thing to know when reading the two packages
 together, and getting it wrong is silent.
 
 `crypto/sumcheck` consumes variables from the **last** position inward, so its fold
-pairs entry `i` with `i + half`. Titan's group sum-check is specified the other way:
-the round-`i` message fixes `rho_i = (r_1, ..., r_(i-1))` as a **prefix**, and the
+pairs entry $`i`$ with `i + half`. Titan's group sum-check is specified the other way:
+the round-$`i`$ message fixes $`\rho_i = (r_1, \ldots, r_{i-1})`$ as a **prefix**, and the
 partial-sum tables are indexed by prefixes. So this package folds the **first**
-variable, pairing `2i` with `2i+1`.
+variable, pairing `2i` with $`2i+1`$.
 
 | Helper | Substitutes | Pairs |
 |--------|-------------|-------|
-| `sumcheck.FieldPoly.fold` | the last variable | `i` with `i + half` |
-| `titan.foldFirstField` / `foldFirstGroup` | the first variable | `2i` with `2i+1` |
+| `sumcheck.FieldPoly.fold` | the last variable | $`i`$ with `i + half` |
+| `titan.foldFirstField` / `foldFirstGroup` | the first variable | `2i` with $`2i+1`$ |
 
 A round-trip test **cannot** catch a mistake here: prover and verifier fold
 identically, so the error cancels between them and the proof still verifies.
@@ -185,16 +185,16 @@ cross-implementation test in [section 10](#10-testing) catches it independently.
 
 ### 6.3 Round Degree Is 2
 
-The summand `h = eq * f` is a product of two multilinears, so each round message is
-quadratic and needs three evaluations. The package sends `g_i(0)`, `g_i(1)`,
-`g_i(2)`, and the verifier interpolates on the nodes `{0,1,2}`.
+The summand $`h = \mathrm{eq} \cdot f`$ is a product of two multilinears, so each round message is
+quadratic and needs three evaluations. The package sends $`g_i(0)`$, $`g_i(1)`$,
+$`g_i(2)`$, and the verifier interpolates on the nodes `{0,1,2}`.
 
-Rounds `i <= ell` isolate the `u`-dependent part so the three evaluations share the
-MSM work: splitting `S_i` at its newest variable gives two `u`-independent MSMs `H0`
-and `H1` of size `2^(i-1)`, after which each `g_i(u)` is two scalar multiplications:
+Rounds `i <= ell` isolate the $`u`$-dependent part so the three evaluations share the
+MSM work: splitting $`S_i`$ at its newest variable gives two $`u`$-independent MSMs $`H_0`$
+and $`H_1`$ of size $`2^{i-1}`$, after which each `g_i(u)` is two scalar multiplications:
 
-```
-g_i(u) = K*(1-u)/(1-alpha_i) * H0  +  K*u/alpha_i * H1,     K = eq(rho, u, alpha_i)
+```math
+g_i(u) = \frac{K (1-u)}{1-\alpha_i} H_0 + \frac{K u}{\alpha_i} H_1, \qquad K = \mathrm{eq}(\rho, u, \alpha_i)
 ```
 
 This turns three MSMs per round into two. It comes from the reference
@@ -202,8 +202,8 @@ implementation rather than the paper text.
 
 ### 6.4 The `alpha` Boundary Case
 
-The `H0`/`H1` form divides by `alpha_i` and `1 - alpha_i`. A coordinate of `alpha`
-that is exactly `0` or `1` makes `eq(alpha_i, b)` vanish and the reciprocal
+The $`H_0`$/$`H_1`$ form divides by `alpha_i` and $`1 - \alpha_i`$. A coordinate of `alpha`
+that is exactly `0` or `1` makes $`\mathrm{eq}(\alpha_i, b)`$ vanish and the reciprocal
 undefined. On the honest path `alpha` comes from a transcript, so this has negligible
 probability — but the reference implementation calls `.invert().unwrap()` and
 **panics**. Here it returns `ErrZeroDenominator`, naming the offending index.
@@ -217,9 +217,9 @@ Exactly as with `crypto/sumcheck`: a `nil` error from `VerifyGroupEval` means th
 **follows from** the returned `GroupSumCheckOpening`. It does **not** mean the opening
 is correct. A prover free to choose the residual value can prove any sum.
 
-The caller must check `Expected` against `eq(alpha, R) * f(R)`, with `f(R)` obtained
-from the WHIR oracle rather than from the prover's choice; the `eq` factor the
-verifier computes itself, since `alpha` and `R` are public. Omitting that step leaves
+The caller must check `Expected` against $`\mathrm{eq}(\alpha, R) \cdot f(R)`$, with `f(R)` obtained
+from the WHIR oracle rather than from the prover's choice; the $`\mathrm{eq}`$ factor the
+verifier computes itself, since `alpha` and $`R`$ are public. Omitting that step leaves
 no soundness at all.
 
 **[Section 13](#13-folding-closing-the-claim) does this**, so a caller no longer has to.
@@ -236,37 +236,37 @@ here: **one commitment mechanism, two entry points**.
 
 | | Mechanism | Assumption | What it binds |
 |---|---|---|---|
-| Tier 1 | Pedersen MSM per matrix row | discrete log | row coefficients to `G_j` |
-| Tier 2 | Merkle root over the RS codeword | random oracle | `G` to a queryable oracle |
+| Tier 1 | Pedersen MSM per matrix row | discrete log | row coefficients to $`G_j`$ |
+| Tier 2 | Merkle root over the RS codeword | random oracle | $`G`$ to a queryable oracle |
 
 ```
 CommitGroupWithFold(G)  = tier 2              a group polynomial commitment
 CommitFieldWithFold(f)  = tier 1 then tier 2  a field polynomial commitment
 ```
 
-Note the direction of tier 1: Pedersen does not commit *to* `G`, it **produces**
-`G`. The group multilinear is the *output* of the first tier. `G` is already a
-commitment to `f`, row by row; tier 2 then makes it queryable.
+Note the direction of tier 1: Pedersen does not commit *to* $`G`$, it **produces**
+$`G`$. The group multilinear is the *output* of the first tier. $`G`$ is already a
+commitment to $`f`$, row by row; tier 2 then makes it queryable.
 
 ### 7.1 Tier 1: rows to a group multilinear
 
-Read the `2^m` coefficients of `f` as a `rows x cols` matrix and Pedersen-commit
+Read the $`2^m`$ coefficients of $`f`$ as a `rows x cols` matrix and Pedersen-commit
 each row against public generators:
 
-```
-G_j = sum_k  f[j*cols + k] * gens[k]
+```math
+G_j = \sum_k f[j \cdot \mathit{cols} + k] \cdot \mathit{gens}[k]
 ```
 
 one MSM of length `cols` per row. The `rows` results **are** the evaluation table of
-`G`: in the little-endian convention this package and `crypto/sumcheck` share,
-entry `j` already holds the value at the bit decomposition of `j`, so despite the
+$`G`$: in the little-endian convention this package and `crypto/sumcheck` share,
+entry $`j`$ already holds the value at the bit decomposition of $`j`$, so despite the
 word "interpolate" in the protocol description there is no interpolation step to
 perform. `TestCommitFieldGroupPolyIsTheEvaluationTable` pins this by checking
 `EvaluatePoint` on boolean points against the row commitments.
 
-**Odd `m` needs a decision, not a silent floor.** For even `m` the split is the
-square `2^(m/2)` by `2^(m/2)`. For odd `m = 2s+1` no square split exists, and the
-extra variable goes to the **rows**: `2^(s+1)` rows of `2^s` columns. This keeps the
+**Odd $`m`$ needs a decision, not a silent floor.** For even $`m`$ the split is the
+square $`2^{m/2}`$ by $`2^{m/2}`$. For odd $`m = 2s+1`$ no square split exists, and the
+extra variable goes to the **rows**: $`2^{s+1}`$ rows of $`2^s`$ columns. This keeps the
 row MSMs shorter and grows the group multilinear instead, which is the cheaper side
 to grow. The choice is arbitrary but must be fixed, since prover and verifier have
 to agree; `matrixShape` asserts `rows*cols == 2^m` so the two cannot drift.
@@ -274,7 +274,7 @@ to agree; `matrixShape` asserts `rows*cols == 2^m` so the two cannot drift.
 ### 7.2 Tier 2: codeword to Merkle root
 
 `EncodeGroupOracle` (section 4) gives `|L|` group elements. Those are grouped into
-cosets of `2^k` points, each coset is one Merkle leaf, and a root over those leaves is
+cosets of $`2^k`$ points, each coset is one Merkle leaf, and a root over those leaves is
 the commitment `[[G]]`.
 
 > **The flat codeword is no longer committed.** The tree described here is built over
@@ -310,7 +310,7 @@ advance* the single leaf a proof will later be wanted for, and which must be cal
 on an empty tree (`tree.go:319-321`) because after any `Push` the data for every
 other index is already discarded. `Prove` panics if it was never called, and
 `PushSubTree` explicitly forbids the subtree holding the proof index
-(`tree.go:254-259`). So `t` openings would mean `t` full rebuilds.
+(`tree.go:254-259`). So $`t`$ openings would mean $`t`$ full rebuilds.
 
 WHIR opens many positions of a small tree, which is the opposite trade. The
 measured gap is large: see section 9.3.
@@ -343,30 +343,30 @@ tree shape from a plain power-of-two tree, and takes a single `proofIndex` so it
 cannot express batch openings. **Neither the builder nor the verifier is reused;
 the `accumulator/merkletree` import does not appear in this package.**
 
-### 7.4 Leaves are cosets from the start, with `k = 0`
+### 7.4 Leaves are cosets from the start, with $`k = 0`$
 
-A leaf holds `2^k` group elements, not one. The `O(n^(1/4))` variant needs
+A leaf holds $`2^k`$ group elements, not one. The $`O(n^{1/4})`$ variant needs
 coset-wise leaves -- the Rust reference's Merkle config is `Leaf = Vec<G>`
-(`group_whir_committer.rs:102`) and its committer takes a folding dimension `k`
+(`group_whir_committer.rs:102`) and its committer takes a folding dimension $`k`$
 (`group_whir_committer.rs:257-285`).
 
-Choosing `k > 0` is deferred. The leaf **shape** is not, because it determines every
+Choosing $`k > 0`$ is deferred. The leaf **shape** is not, because it determines every
 root and every proof format in the scheme, and retrofitting it later would
-invalidate both. So the type is coset-shaped now and the first cut passes `k = 0`,
-giving one point per leaf and identical roots to a scalar-leaf design. The `k > 0`
+invalidate both. So the type is coset-shaped now and the first cut passes $`k = 0`$,
+giving one point per leaf and identical roots to a scalar-leaf design. The $`k > 0`$
 remodel is not ported yet.
 
 Cosets are **contiguous** blocks of the codeword, never strided. A strided chunking
 would still build a valid-looking tree over a permutation of the same points, which
 no round-trip test could see, so
 `TestCommitGroupLeavesArePartitionOfCodeword` checks that concatenating the leaves
-reproduces the codeword in order, for every `k`.
+reproduces the codeword in order, for every $`k`$.
 
 ### 7.5 What this does not do
 
 A commitment here is binding and queryable **by position** of the codeword. It is
-not yet an evaluation proof: nothing in this section shows that `f(z) = v` for a
-claimed `v`. That needs the group sum-check of section 6 plus the folding rounds of
+not yet an evaluation proof: nothing in this section shows that $`f(z) = v`$ for a
+claimed $`v`$. That needs the group sum-check of section 6 plus the folding rounds of
 [section 13](#13-folding-closing-the-claim). `Commit` and `Eval` are separate for that
 reason, and "commitment" should not be read as "PCS complete".
 
@@ -389,8 +389,8 @@ stepping stone to the coset oracle, not a commitment anyone opens.
 
 Two costs, no benefit:
 
-1. **A hash pass for no verifier** — a full tree over `2^(RowVars+LogRate)` leaves.
-   Measured at `m = 12`: ~0.7% of commit time, 65 KB and ~1,050 allocations. Small,
+1. **A hash pass for no verifier** — a full tree over $`2^{\mathrm{RowVars} + \mathrm{LogRate}}`$ leaves.
+   Measured at $`m = 12`$: ~0.7% of commit time, 65 KB and ~1,050 allocations. Small,
    because row MSMs and the FFT dominate; this was not the reason to remove it.
 2. **A footgun of exactly the kind this package keeps finding.** An exported `[]byte`
    named `Root` invites a future batching or serialization layer to
@@ -427,17 +427,17 @@ if err != nil {
 
 | Function | Input | Output | Used for |
 |----------|-------|--------|----------|
-| `NewDomain(logSize)` | `d` | `*Domain` | the Reed-Solomon evaluation domain `L` |
+| `NewDomain(logSize)` | $`d`$ | `*Domain` | the Reed-Solomon evaluation domain $`L`$ |
 | `EncodeGroupOracle(p, dom)` | `sumcheck.GroupPoly` | `[]bls12381.G1Affine` | the committed oracle for `Gtilde` |
 | `EncodeFieldOracle(p, dom)` | `sumcheck.FieldPoly` | `[]fr.Element` | the public generator polynomial `gtilde`, which the verifier recomputes |
-| `ProveGroupEval(curve, f, alpha, ell)` | `sumcheck.GroupPoly`, point, split | proof, opening, `sigma` | the evaluation claim `f(alpha)` |
+| `ProveGroupEval(curve, f, alpha, ell)` | `sumcheck.GroupPoly`, point, split | proof, opening, `sigma` | the evaluation claim $`f(\alpha)`$ |
 | `VerifyGroupEval(curve, proof, alpha, sigma)` | proof + public data | opening | checking that claim |
-| `DefaultSplit(m)` | `m` | `m/2` | the prover's cost-optimal split point |
+| `DefaultSplit(m)` | $`m`$ | $`m/2`$ | the prover's cost-optimal split point |
 | `NewGenerators(curve, gens)` | `[]bls12381.G1Affine` | `*Generators` | the converted-once generator cache for `Eval` |
-| `Eval` / `VerifyEval` | see [section 12.10](#1210-api) | `*EvalProof` | the field evaluation proof `f(alpha) = sigma` |
+| `Eval` / `VerifyEval` | see [section 12.10](#1210-api) | `*EvalProof` | the field evaluation proof $`f(\alpha) = \sigma`$ |
 | `EvalGroup` / `VerifyEvalGroup` | see [section 12.10](#1210-api) | `*GroupEvalProof` | the group evaluation proof |
-| `CommitGroupWithFold` / `CommitFieldWithFold` | poly, domain, `k`, `FoldConfig` | commitment + hint | a commitment whose opening is **sound**; see [section 13](#13-folding-closing-the-claim) |
-| `DefaultFoldConfig(m)` | `m` | `FoldConfig` | size-optimal `ell`, rate 1/8, `Q = 43` |
+| `CommitGroupWithFold` / `CommitFieldWithFold` | poly, domain, $`k`$, `FoldConfig` | commitment + hint | a commitment whose opening is **sound**; see [section 13](#13-folding-closing-the-claim) |
+| `DefaultFoldConfig(m)` | $`m`$ | `FoldConfig` | size-optimal `ell`, rate 1/8, $`Q = 43`$ |
 | `EncodeCosets(p, dom, ell)` | `sumcheck.GroupPoly` | leaves + folded domain | the coset oracle `{f(b, powers(y))}` |
 | `CommitCosets(p, dom, ell)` | `sumcheck.GroupPoly` | `*CosetCommitment` + hint | the Merkle root over cosets |
 | `EncodeGroupOracleAt(p, dom, i)` | poly, domain, index | one `G1Affine` | one codeword point, so the verifier stays sublinear |
@@ -454,7 +454,7 @@ otherwise); a strictly larger domain is what gives the code a rate below 1.
 
 The group sum-check takes `*mathlib.Curve` because it reuses
 `crypto/rp/csp.Transcript` for Fiat-Shamir, under its own domain separator
-`TitanGroupSumCheck-v2`. It absorbs `m` and `alpha` before the first round, so a proof
+`TitanGroupSumCheck-v2`. It absorbs $`m`$ and `alpha` before the first round, so a proof
 cannot be reinterpreted under different public parameters:
 
 ```go
@@ -471,7 +471,7 @@ if err != nil {
 // see section 6.5. Eval/EvalGroup over a CommitGroupWithFold commitment close it.
 ```
 
-`sigma` is returned rather than taken as an argument, since it is determined by `f`
+`sigma` is returned rather than taken as an argument, since it is determined by $`f`$
 and `alpha`. `ell` is the prover's own performance knob: every value produces the same
 proof, so the verifier does not take it and the transcript does not absorb it. (The v1
 transcript absorbed `ell`, which forced the verifier to take it while binding nothing.)
@@ -536,7 +536,7 @@ if !titan.VerifyMerkleProof(c.Cosets.Root, coset, proof) {
 }
 ```
 
-`Commitment` carries `NumVars`, `LogDomain`, `K`, `NumLeaves` and `ColVars`, because a
+`Commitment` carries `NumVars`, `LogDomain`, $`K`$, `NumLeaves` and `ColVars`, because a
 root alone is ambiguous across parameter choices — a verifier must check the shape
 against what it expects rather than trusting the prover's.
 
@@ -545,7 +545,7 @@ provenance is a separate question this package does not answer. At least `cols`
 generators are required (`ErrInsufficientGenerators`).
 
 Committing is not opening: `Commitment` plus `OpenCoset` is binding and queryable by
-*position*, and proving `f(alpha) = sigma` is [section 12](#12-evaluation).
+*position*, and proving $`f(\alpha) = \sigma`$ is [section 12](#12-evaluation).
 
 `VerifyMerkleProof` returns a `bool`, not an `error`, because every failure is the
 same verdict — this proof does not open this root — and distinguishing malformed
@@ -553,22 +553,22 @@ input from a mismatch would hand an adversary a distinguisher.
 
 ## 9. Performance Notes
 
-Measured on an Apple M4 Max, rate-1/2 domain (`d = m + 1`):
+Measured on an Apple M4 Max, rate-1/2 domain ($`d = m + 1`$):
 
-| `m` | Butterfly | Naive (per-point evaluation) | Speedup |
+| $`m`$ | Butterfly | Naive (per-point evaluation) | Speedup |
 |-----|-----------|------------------------------|---------|
 | 6 | 16.6 ms | 325 ms | **19.5x** |
 | 8 | 82.3 ms | 5374 ms | **65x** |
 | 10 | 431 ms | — | — |
 
-The speedup grows with `m` because the naive baseline is quadratic in `n` in
-scalar multiplications while the butterfly is `n log n`.
+The speedup grows with $`m`$ because the naive baseline is quadratic in $`n`$ in
+scalar multiplications while the butterfly is $`n \log n`$.
 
 ### 9.1 Where the Remaining Cost Is, and the Obvious Next Optimization
 
-The butterfly performs exactly one scalar multiplication per node. For `m = 10`,
-`d = 11` that is **10240** scalar multiplications, matching `(n/2) * log n = 11264`
-to within the `d > m` bookkeeping. Since scalar multiplications are ~137x more
+The butterfly performs exactly one scalar multiplication per node. For $`m = 10`$,
+$`d = 11`$ that is **10240** scalar multiplications, matching $`(n/2)\log n = 11264`$
+to within the $`d > m`$ bookkeeping. Since scalar multiplications are ~137x more
 expensive than curve additions on this curve
 ([sum-check §6.2](sumcheck.md#62-scalar-multiplication-dominates-the-group-path)),
 they are essentially the whole cost.
@@ -591,7 +591,7 @@ verifiable against the reference.
 
 ### 9.2 The Split Point, and a Bottleneck That Hid It
 
-Measured on an Apple M4 Max, `m = 12` (4096 group coefficients), sweeping `ell`:
+Measured on an Apple M4 Max, $`m = 12`$ (4096 group coefficients), sweeping `ell`:
 
 | `ell` | Prover | Note |
 |-------|--------|------|
@@ -600,25 +600,25 @@ Measured on an Apple M4 Max, `m = 12` (4096 group coefficients), sweeping `ell`:
 | 4 | 72 ms | |
 | **6** | **39.7 ms** | `DefaultSplit(12)`, the optimum — **6.2× the baseline** |
 | 8 | 59 ms | |
-| 10 | 155 ms | `S_ell` now dominates |
+| 10 | 155 ms | $`S_{\ell}`$ now dominates |
 | 12 | 236 ms | all partial-sum |
 
-The curve has a clear minimum at `m/2`, which is what the cost analysis predicts, and
+The curve has a clear minimum at $`m/2`$, which is what the cost analysis predicts, and
 it rises at both ends: too small an `ell` leaves work in the folklore tail, too large
-makes `S_ell` itself the expensive part.
+makes $`S_{\ell}`$ itself the expensive part.
 
-Prover scaling at `ell = m/2` is roughly 2× per additional variable — 10.3 ms at
-`m = 8`, 19.0 ms at `m = 10`, 39.8 ms at `m = 12`. The verifier is flat at **1.7 ms**,
-since it holds no polynomial and does `O(m)` group operations.
+Prover scaling at $`\ell = m/2`$ is roughly 2× per additional variable — 10.3 ms at
+$`m = 8`$, 19.0 ms at $`m = 10`$, 39.8 ms at $`m = 12`$. The verifier is flat at **1.7 ms**,
+since it holds no polynomial and does $`O(m)`$ group operations.
 
 **The bottleneck that hid all of this.** The first working version measured *flat*
-across every `ell` — 246 ms at `ell = 0` against 250 ms at `ell = 6` — which would
+across every `ell` — 246 ms at $`\ell = 0`$ against 250 ms at $`\ell = 6`$ — which would
 have meant the partial-sum machinery bought nothing. Timing the phases separately
 found the cause, and it was not the scheme:
 
-| Phase (`m=12`, `ell=6`) | Before | After |
+| Phase ($`m = 12`$, $`\ell = 6`$) | Before | After |
 |-------------------------|--------|-------|
-| Build `S` tables | 15 ms | 15 ms |
+| Build $`S`$ tables | 15 ms | 15 ms |
 | MSM round messages | **3 ms** | 3 ms |
 | **Restrict for the folklore tail** | **221 ms** | **~8 ms** |
 | Folklore tail | 7 ms | 7 ms |
@@ -626,23 +626,23 @@ found the cause, and it was not the scheme:
 The round messages were already ~80× faster than the folklore prover, exactly as
 promised. But entering the folklore phase restricted the group polynomial by folding
 one variable at a time, `ell` times — each a full pass of scalar multiplications over
-a table starting at `2^m` entries. That single step cost more than everything else
+a table starting at $`2^m`$ entries. That single step cost more than everything else
 combined and erased the entire speedup.
 
-The fix is to do the restriction as a **contraction against the `eq(rho, .)` table**:
+The fix is to do the restriction as a **contraction against the $`\mathrm{eq}(\rho, \cdot)`$ table**:
 
-```
-f(rho, y) = sum over b in {0,1}^|rho| of eq(rho, b) * f(b, y)
+```math
+f(\rho, y) = \sum_{b \in \{0,1\}^{\lvert\rho\rvert}} \mathrm{eq}(\rho, b) \cdot f(b, y)
 ```
 
-one MSM of length `2^|rho|` per surviving entry. The scalar-multiplication count is
+one MSM of length $`2^{\lvert\rho\rvert}`$ per surviving entry. The scalar-multiplication count is
 unchanged; batching them into MSMs lets Pippenger amortize the window precomputation
 across each slice instead of paying it per point. The reference implementation does
 the same thing (and wraps it in a `"Restrict time"` timer, so its author was watching
 this cost too).
 
 No transpose is needed for this contraction, unlike in `computeSTables`. Folding the
-first variable repeatedly consumes `rho` in order, which makes the consumed prefix the
+first variable repeatedly consumes $`\rho`$ in order, which makes the consumed prefix the
 low bits *within* each contiguous block, so the slice is already contiguous.
 `computeSTables` needs a transpose because there it is the surviving suffix, not the
 prefix, that is strided. Getting this backwards was caught immediately by the
@@ -651,18 +651,18 @@ cross-path tests.
 
 ### 9.3 Merkle Commitment, and the Cost That Justified a Custom Tree
 
-Measured on an Apple M4 Max, one point per leaf (`k = 0`).
+Measured on an Apple M4 Max, one point per leaf ($`k = 0`$).
 
 | Leaves | `BuildTree` |
 |---|---|
-| `2^8` | 72.6 us |
-| `2^10` | 236 us |
-| `2^12` | 679 us |
-| `2^14` | 2.62 ms |
+| $`2^8`$ | 72.6 us |
+| $`2^{10}`$ | 236 us |
+| $`2^{12}`$ | 679 us |
+| $`2^{14}`$ | 2.62 ms |
 
-Linear in the leaf count, as expected: one leaf hash each plus `n - 1` node hashes.
+Linear in the leaf count, as expected: one leaf hash each plus $`n - 1`$ node hashes.
 
-Openings on a `2^14` tree, with every level retained:
+Openings on a $`2^{14}`$ tree, with every level retained:
 
 | Openings | Total | Per opening |
 |---|---|---|
@@ -672,7 +672,7 @@ Openings on a `2^14` tree, with every level retained:
 
 This is the measurement that justifies not adapting gnark-crypto's streaming tree
 (section 7.3). There, an opening requires a full rebuild, because leaves are not
-retained. So 100 openings of a `2^14` tree would cost `100 x 2.62 ms = 262 ms`
+retained. So 100 openings of a $`2^{14}`$ tree would cost `100 x 2.62 ms = 262 ms`
 against the **25.5 us** measured here — roughly a **10,000x** gap, and it widens
 linearly with the number of queries. WHIR opens many positions of one small tree, so
 this is precisely the regime where the streaming design is wrong.
@@ -686,14 +686,14 @@ Verification is linear in depth, as it should be:
 
 End-to-end field commitment, both tiers, rate-1/2 domain:
 
-| `m` | `commitField` |
+| $`m`$ | `commitField` |
 |---|---|
 | 10 | 8.24 ms |
 | 12 | 19.5 ms |
 | 14 | 46.8 ms |
 
-Tier 1 dominates: it is `rows` MSMs of length `cols`, i.e. `2^m` scalar
-multiplications in total, against the tree's `O(sqrt(n))` hashes. The Merkle layer is
+Tier 1 dominates: it is `rows` MSMs of length `cols`, i.e. $`2^m`$ scalar
+multiplications in total, against the tree's $`O(\sqrt{n})`$ hashes. The Merkle layer is
 not the bottleneck and tuning it would be premature.
 
 ## 10. Porting Notes: Rust/Pasta to Go/BLS12-381
@@ -702,12 +702,12 @@ The reference implementation is Rust over the Pasta curves. Two things made the
 port safe:
 
 - **Two-adicity is identical.** Pallas's `Fq` and BLS12-381's `Fr` both have
-  two-adicity **32** (verified by factoring `r - 1`, not by trusting
+  two-adicity **32** (verified by factoring $`r - 1`$, not by trusting
   documentation). Any smooth domain expressible in the reference is expressible
   here, so the encoding carries over with no change of domain strategy. This was
   the single largest portability risk and it is a non-issue.
 - **The indexing convention already agrees.** The Rust code indexes multilinear
-  coefficients as `coeffs[b_1 + 2*b_2 + ... + 2^(m-1)*b_m]`, which is the same
+  coefficients as $`\mathit{coeffs}[b_1 + 2 b_2 + \cdots + 2^{m-1} b_m]`$, which is the same
   little-endian layout this repository uses. The bit-reversal and butterfly port
   essentially as-is.
 
@@ -720,25 +720,25 @@ so the Go verifier must be written from the paper rather than ported.
 
 | File | Coverage |
 |------|----------|
-| `encode_test.go` | naive cross-check for `m ∈ 1..8` (field) and `1..6` (group) × rates `d - m ∈ {0,1,2}`; group-vs-field-scaled cross-check; degree bound via inverse DFT; domain generator primitivity and distinctness; bit-reversal semantics; input immutability; validation errors |
+| `encode_test.go` | naive cross-check for $`m \in \{1, \ldots, 8\}`$ (field) and `1..6` (group) × rates $`d - m \in \{0,1,2\}`$; group-vs-field-scaled cross-check; degree bound via inverse DFT; domain generator primitivity and distinctness; bit-reversal semantics; input immutability; validation errors |
 | `encode_bench_test.go` | butterfly vs naive baseline |
-| `groupsumcheck_test.go` | round-trip for `m ∈ {1,2,3,4,6,8,10}` against a direct `f(alpha)`; residual claim equals `eq(alpha,R)*f(R)`; split invariance over all `ell`; MSM-vs-folklore round-message agreement; cross-check against `crypto/sumcheck`; `S`-table telescoping; `eq` table vs `eqPoint` and partition-of-unity; fold-convention pinning; batch inversion; quadratic interpolation; negatives (wrong sum, tampered first/middle/last round, compensating tamper, dropped round, wrong `ell`, wrong `alpha`); `alpha ∈ {0,1}` returning an error rather than panicking; input immutability; validation |
-| `groupsumcheck_bench_test.go` | prover at `m ∈ {8,10,12}`, the `ell` sweep, and the verifier |
-| `merkle_test.go` | round-trip at every index of trees with `2^0..2^10` leaves × coset dims `k ∈ {0,1,2}`; independent naive recursive root; second-preimage separation; known-answer leaf hash pinning the compressed encoding; wrong leaf / wrong index / tampered sibling / swapped sibling order; wrong proof length, empty path against a deep tree, and truncation at every length; `hashNode` length framing; malformed input; `BuildTree`/`Prove` validation; batch proofs; `Root` returning a copy; determinism; distinct leaves ⇒ distinct roots; `treeDepth` |
-| `commit_test.go` | `CommitGroup` round-trip; leaves are a partition of the codeword in order; tier 1 against a direct per-row MSM; the group poly *is* the evaluation table; odd-`m` matrix shape table; determinism; distinct polys and distinct generators ⇒ distinct commitments (asserted on the tier-1 group multilinear, not a root — §7.6); `Commitment.Root` is nil; validation for `CommitGroup`, `CommitField`; `numVarsOf` |
+| `groupsumcheck_test.go` | round-trip for $`m \in \{1,2,3,4,6,8,10\}`$ against a direct `f(alpha)`; residual claim equals $`\mathrm{eq}(\alpha, R) \cdot f(R)`$; split invariance over all `ell`; MSM-vs-folklore round-message agreement; cross-check against `crypto/sumcheck`; $`S`$-table telescoping; $`\mathrm{eq}`$ table vs `eqPoint` and partition-of-unity; fold-convention pinning; batch inversion; quadratic interpolation; negatives (wrong sum, tampered first/middle/last round, compensating tamper, dropped round, wrong `ell`, wrong `alpha`); $`\alpha \in \{0,1\}`$ returning an error rather than panicking; input immutability; validation |
+| `groupsumcheck_bench_test.go` | prover at $`m \in \{8,10,12\}`$, the `ell` sweep, and the verifier |
+| `merkle_test.go` | round-trip at every index of trees with $`2^0, \ldots, 2^{10}`$ leaves × coset dims $`k \in \{0,1,2\}`$; independent naive recursive root; second-preimage separation; known-answer leaf hash pinning the compressed encoding; wrong leaf / wrong index / tampered sibling / swapped sibling order; wrong proof length, empty path against a deep tree, and truncation at every length; `hashNode` length framing; malformed input; `BuildTree`/`Prove` validation; batch proofs; `Root` returning a copy; determinism; distinct leaves ⇒ distinct roots; `treeDepth` |
+| `commit_test.go` | `CommitGroup` round-trip; leaves are a partition of the codeword in order; tier 1 against a direct per-row MSM; the group poly *is* the evaluation table; odd-$`m`$ matrix shape table; determinism; distinct polys and distinct generators ⇒ distinct commitments (asserted on the tier-1 group multilinear, not a root — §7.6); `Commitment.Root` is nil; validation for `CommitGroup`, `CommitField`; `numVarsOf` |
 | `merkle_fuzz_test.go` | `FuzzVerifyMerkleProof`: never panics, never accepts |
-| `merkle_bench_test.go` | `BuildTree` at `2^8..2^14`; 1/10/100 openings; verify at two depths; `CommitField` at `m ∈ {10,12,14}` |
+| `merkle_bench_test.go` | `BuildTree` at $`2^8, \ldots, 2^{14}`$; 1/10/100 openings; verify at two depths; `CommitField` at $`m \in \{10,12,14\}`$ |
 | `bridge_test.go` | scalar-field order equality pinned as a regression test; G1 round-trip (generator, scalar multiple, negated); infinity rejected; the offending index named on slice conversion; `Zr` round-trip over `0,1,2,255,256,65535,2^40,r-1` and random; add and mul agreeing across the boundary; all four BLS12-381 curve variants preserving the caller's ID; validation; `padTo32` |
-| `eval_test.go` | round-trip for `m ∈ 2..12` asserting *both* acceptance and `sigma == EvaluatePoint(alpha)`; `sigmaPartial` computed two independent ways; leg independence by grafting legs across two commitments; negatives (wrong `sigma`, tampered `sigmaPartial`, tampered row leg, tampered column leg, reversed `alpha`, a proof for another polynomial); `Generators` round-trip, nil receiver, short prefix, infinity, and cross-curve misuse; `EvalAffine` agreeing with the cached path; `checkShape` including the row-count ambiguity; `foldRows` against a direct restriction; group `EvalGroup` round-trip and negatives; leg-2 transcript separator distinctness and rejection of a foreign-header CSP proof; validation |
-| `eval_bench_test.go` | `Eval` and `VerifyEval` at `m ∈ {8,10,12,14}`; `EvalGroup` at `m ∈ {8,10,12}`; the mathlib boundary for generators and scalars at `n ∈ {16,64,128,256}`; cached vs uncached across prove/verify |
-| `domain_test.go` | `g_(d-1) = g_d^2` and `L_d.Elements[i]^2 = L_(d-1).Elements[i mod 2^(d-1)]` for `d ∈ 2..18` — the unstated gnark-crypto dependency all cross-round index arithmetic rests on; `Squared()` against a freshly built domain |
-| `coset_test.go` | the coset **definition** against an independent `EvaluatePoint` (6 configs); `⟨leaf, eq(r)⟩` equals the reduced codeword; two negatives pinning that the coset oracle is **not** a regrouping or a strided read of the flat codeword; `CommitCosets` round-trip and binding; validation |
-| `foldconfig_test.go` | `Q(λ=128, ρ=1/8) = 43` under capacity and 86 under Johnson; the `DefaultEll` size model; `Validate` over `Ell ∈ [1, m]`, odd `m`, bad rate and bad query count; the canonical configuration rejecting only odd and non-positive `m`, with no size floor (13.10) |
-| `queries_test.go` | determinism; dependence on the transcript; range and deduplication including `q > n`; independent draws (a longer draw extends a shorter one); domain coverage; full coverage at `q ≫ n`; validation (nil transcript, non-power-of-two `n`, non-positive `q`) |
-| `fold_test.go` | round-trip for `m ∈ {4,6,8,10}` × `ell ∈ 1..m/2`; the reduced polynomial against `foldFirstField` applied `ell` times; **a lying prover** whose fold runs over another polynomial; **a foreign fold with genuine openings** (the test that check 3 is load-bearing, with `verifyFoldRoundsOnly` asserting checks 1–2 pass); every query position corrupted in turn, including the last; 11 soundness negatives (tampered leaf/path, wrong index, swapped and permuted queries, tampered/replaced/truncated reduced poly, tampered and dropped round, dropped query); wrong claim; wrong `alpha`; short coset; end-to-end `Eval`/`EvalGroup` with folding at `m ∈ {8,12}` incl. anti-downgrade in both directions and the prover-chosen query count; the field path's size constraints under the balanced split (a folding round must fit, and the default queries must be drawable, so `m ≥ 7`; parity is not a constraint, see 13.10), asserting on the *reason* for each rejection since both return `ErrInvalidFoldConfig`; the batched check 3 (per-query failures, per-query sensitivity of the combined equation, and the absorb-before-sample ordering that makes the combination sound without relying on `gamma` — see 13.7); validation |
-| `fold_bench_test.go` | proof size in **real serialized bytes** vs `ell ∈ 1..6` at `m = 12`; prove and verify at `m ∈ {8,10,12}`, the measurement behind the 10× batching speedup in 13.6 |
-| `pcs_test.go` | the facade (13.12): round trip at `m ∈ {8,12,16}` (field) and `{4,6,8,10}` (group); the **two guarantees** — a prover always folds, a verifier refuses an unfolded commitment; wrong value, wrong point, and a foreign proof rejected on both paths; `Verify` vs `VerifyErr` separating misuse from rejection; arity errors incl. `Alpha` sized from the row half; the field path's size constraints at the API boundary, each asserting the sentinel of the check that actually fires (`ErrInvalidMatrixSplit` for an odd row half, `ErrInvalidFoldConfig` for drawability) rather than one sentinel for both; setup validation and nil receivers; the **domain-sizing rule** on both paths, which no functional test can see; **asymmetric splits** at `m ∈ {10,14,18}` — sizes the balanced path rejects outright — with `sigma` checked against `FieldPoly.EvaluatePoint` since a round trip alone cannot see a mis-cut split (13.13) |
-| `split_test.go` | the shape invariant `Rows*Cols = 2^M` over every valid split to `M = 20`; `Validate` as the only split contract, including odd row halves; degenerate splits and the legacy `M=1, M1=0` shape (committable, not foldable); `DefaultMatrixSplit` against `matrixShape` as a compatibility pin (13.10) |
+| `eval_test.go` | round-trip for $`m \in \{2, \ldots, 12\}`$ asserting *both* acceptance and `sigma == EvaluatePoint(alpha)`; `sigmaPartial` computed two independent ways; leg independence by grafting legs across two commitments; negatives (wrong `sigma`, tampered `sigmaPartial`, tampered row leg, tampered column leg, reversed `alpha`, a proof for another polynomial); `Generators` round-trip, nil receiver, short prefix, infinity, and cross-curve misuse; `EvalAffine` agreeing with the cached path; `checkShape` including the row-count ambiguity; `foldRows` against a direct restriction; group `EvalGroup` round-trip and negatives; leg-2 transcript separator distinctness and rejection of a foreign-header CSP proof; validation |
+| `eval_bench_test.go` | `Eval` and `VerifyEval` at $`m \in \{8,10,12,14\}`$; `EvalGroup` at $`m \in \{8,10,12\}`$; the mathlib boundary for generators and scalars at $`n \in \{16,64,128,256\}`$; cached vs uncached across prove/verify |
+| `domain_test.go` | $`g_{d-1} = g_d^2`$ and `L_d.Elements[i]^2 = L_(d-1).Elements[i mod 2^(d-1)]` for $`d \in \{2, \ldots, 18\}`$ — the unstated gnark-crypto dependency all cross-round index arithmetic rests on; `Squared()` against a freshly built domain |
+| `coset_test.go` | the coset **definition** against an independent `EvaluatePoint` (6 configs); $`\langle \mathit{leaf}, \mathrm{eq}(r) \rangle`$ equals the reduced codeword; two negatives pinning that the coset oracle is **not** a regrouping or a strided read of the flat codeword; `CommitCosets` round-trip and binding; validation |
+| `foldconfig_test.go` | $`Q(\lambda = 128, \rho = 1/8) = 43`$ under capacity and 86 under Johnson; the `DefaultEll` size model; `Validate` over $`\ell \in [1, m]`$, odd $`m`$, bad rate and bad query count; the canonical configuration rejecting only odd and non-positive $`m`$, with no size floor (13.10) |
+| `queries_test.go` | determinism; dependence on the transcript; range and deduplication including $`q > n`$; independent draws (a longer draw extends a shorter one); domain coverage; full coverage at `q ≫ n`; validation (nil transcript, non-power-of-two $`n`$, non-positive $`q`$) |
+| `fold_test.go` | round-trip for $`m \in \{4,6,8,10\}`$ × $`\ell \in \{1, \ldots, m/2\}`$; the reduced polynomial against `foldFirstField` applied `ell` times; **a lying prover** whose fold runs over another polynomial; **a foreign fold with genuine openings** (the test that check 3 is load-bearing, with `verifyFoldRoundsOnly` asserting checks 1–2 pass); every query position corrupted in turn, including the last; 11 soundness negatives (tampered leaf/path, wrong index, swapped and permuted queries, tampered/replaced/truncated reduced poly, tampered and dropped round, dropped query); wrong claim; wrong `alpha`; short coset; end-to-end `Eval`/`EvalGroup` with folding at $`m \in \{8,12\}`$ incl. anti-downgrade in both directions and the prover-chosen query count; the field path's size constraints under the balanced split (a folding round must fit, and the default queries must be drawable, so $`m \ge 7`$; parity is not a constraint, see 13.10), asserting on the *reason* for each rejection since both return `ErrInvalidFoldConfig`; the batched check 3 (per-query failures, per-query sensitivity of the combined equation, and the absorb-before-sample ordering that makes the combination sound without relying on `gamma` — see 13.7); validation |
+| `fold_bench_test.go` | proof size in **real serialized bytes** vs $`\ell \in \{1, \ldots, 6\}`$ at $`m = 12`$; prove and verify at $`m \in \{8,10,12\}`$, the measurement behind the 10× batching speedup in 13.6 |
+| `pcs_test.go` | the facade (13.12): round trip at $`m \in \{8,12,16\}`$ (field) and `{4,6,8,10}` (group); the **two guarantees** — a prover always folds, a verifier refuses an unfolded commitment; wrong value, wrong point, and a foreign proof rejected on both paths; `Verify` vs `VerifyErr` separating misuse from rejection; arity errors incl. `Alpha` sized from the row half; the field path's size constraints at the API boundary, each asserting the sentinel of the check that actually fires (`ErrInvalidMatrixSplit` for an odd row half, `ErrInvalidFoldConfig` for drawability) rather than one sentinel for both; setup validation and nil receivers; the **domain-sizing rule** on both paths, which no functional test can see; **asymmetric splits** at $`m \in \{10,14,18\}`$ — sizes the balanced path rejects outright — with `sigma` checked against `FieldPoly.EvaluatePoint` since a round trip alone cannot see a mis-cut split (13.13) |
+| `split_test.go` | the shape invariant $`\mathrm{Rows} \cdot \mathrm{Cols} = 2^M`$ over every valid split to $`M = 20`$; `Validate` as the only split contract, including odd row halves; degenerate splits and the legacy $`M = 1,\ M_1 = 0`$ shape (committable, not foldable); `DefaultMatrixSplit` against `matrixShape` as a compatibility pin (13.10) |
 
 Statement coverage is **90.8%** overall, race-clean. (It moved from 92.6% because the
 folding phase added more error paths than the negatives exercise; the soundness-critical
@@ -747,7 +747,7 @@ branches are covered, and section 13.7 records which mutations confirm that.)
 Three tests carry most of the weight:
 
 - **`TestCrossCheckAgainstSumCheck`** proves the same claim with the general
-  `crypto/sumcheck` implementation, as the two-factor product `eq(alpha, .) * f(.)`,
+  `crypto/sumcheck` implementation, as the two-factor product $`\mathrm{eq}(\alpha, \cdot) \cdot f(\cdot)`$,
   and requires the sums to agree. The two share no code on the proving path —
   opposite variable order, different round construction, different transcript — so
   agreement is meaningful. The round messages cannot be compared directly, since the
@@ -767,16 +767,16 @@ suite — the tests are not vacuous:
 | Mutation | Caught by |
 |----------|-----------|
 | transpose dropped in `computeSTables` | round-trip, split invariance |
-| `S`-descent pairs `b` with `b+1` instead of `b+half` | 5 tests incl. telescoping |
-| `H0`/`H1` swapped | round-trip, cross-path |
+| $`S`$-descent pairs $`b`$ with `b+1` instead of `b+half` | 5 tests incl. telescoping |
+| $`H_0`$/$`H_1`$ swapped | round-trip, cross-path |
 | folklore `g(2)` uses `3*s11` instead of `4*s11` | 4 tests |
 | `foldFirstField` folds the *last* variable | convention test + 5 others |
-| verifier carries `g(1)` forward instead of interpolating at `r` | round-trip, split invariance |
+| verifier carries `g(1)` forward instead of interpolating at $`r`$ | round-trip, split invariance |
 | `eqTable` writes the low slice first (the aliasing bug its comment warns about) | 7 tests |
-| `eqTable` swaps `alpha` and `1-alpha` between slices | 6 tests |
+| `eqTable` swaps `alpha` and $`1 - \alpha`$ between slices | 6 tests |
 | verifier checks round consistency only in round 1 | all four negative tests |
 | `restrictBoth` contracts a strided slice instead of a contiguous one | 4 tests |
-| `restrictBoth` skips folding the `eq` factor | 8 tests |
+| `restrictBoth` skips folding the $`\mathrm{eq}`$ factor | 8 tests |
 
 The last two were added after the `restrictBoth` rewrite described in
 [section 9.2](#92-the-split-point-and-a-bottleneck-that-hid-it), to confirm the
@@ -788,7 +788,7 @@ naive side reuses the independently-tested evaluator from `crypto/sumcheck`, so
 the two sides share no code.
 
 `TestEncodeGroupMatchesFieldScaled` is the strongest structural check: with
-`g(x) = [s(x)]G`, the group codeword must be the field codeword scaled into G1
+$`g(x) = [s(x)]\,G`$, the group codeword must be the field codeword scaled into G1
 pointwise. An error in the group butterfly that a group-only test would reproduce
 on both sides shows up here.
 
@@ -841,7 +841,7 @@ The two interesting entries are the ones that were not killed on the first pass.
 | `idx >>= 1` dropped from the `Prove` walk | round-trip at every index |
 | `chunkIntoCosets` strides instead of slicing contiguously | leaves-are-a-partition test |
 | tier-1 row MSM offsets `gens` by one | direct-MSM cross-check |
-| odd-`m` `matrixShape` sends the extra variable to the columns | shape table, `rows·cols` assertion |
+| odd-$`m`$ `matrixShape` sends the extra variable to the columns | shape table, $`\mathit{rows} \cdot \mathit{cols}`$ assertion |
 | `Root()` returns the live slice, not a copy | `TestRootIsACopy` |
 | ragged-`leaves` check dropped | `TestBuildTreeValidation` |
 | **proof-length check dropped** | **nothing — a real gap, see below** |
@@ -898,7 +898,7 @@ go test ./token/core/zkatdlog/nogh/v1/crypto/titan/ -run='^$' -bench=. -benchtim
 ## 12. Evaluation
 
 Sections 6-11 give a commitment that is binding and queryable *by position*. They do
-not prove `f(alpha) = sigma`. `Eval` closes that, and it is what makes this a
+not prove $`f(\alpha) = \sigma`$. `Eval` closes that, and it is what makes this a
 polynomial commitment scheme rather than a vector commitment with extra structure.
 
 ### 12.1 Two legs, and why neither is optional
@@ -929,16 +929,16 @@ are not actually tied together", which is the subtle way a two-leg proof goes un
 This is the pivot of the construction, and it is worth stating explicitly because it
 looks like a coincidence and is not.
 
-Tier 1 set `G_j = MSM(gens, row_j)`. Taking the `eq(alphaRow, .)` combination of the
+Tier 1 set $`G_j = \mathrm{MSM}(\mathit{gens}, \mathit{row}_j)`$. Taking the `eq(alphaRow, .)` combination of the
 rows therefore **commutes** with the MSM:
 
     sigmaPartial = sum_j eq_j * MSM(gens, row_j)
                  = MSM(gens, sum_j eq_j * row_j)
                  = MSM(gens, a)            where a = fold(rows, alphaRow)
 
-Read left to right it is `G(alphaRow)`, an *evaluation* of the group multilinear —
+Read left to right it is $`G(\alpha_{\mathrm{row}})`$, an *evaluation* of the group multilinear —
 which is what leg 1 proves. Read right to left it is the Pedersen *commitment* to the
-folded row vector `a` — which is what leg 2 opens. One group element, two readings,
+folded row vector $`a`$ — which is what leg 2 opens. One group element, two readings,
 and the proof is sound precisely because they coincide.
 
 **Linearity of the MSM in the message is the entire reason.** Any row commitment that
@@ -954,7 +954,7 @@ requires them equal, pinning the identity rather than the code path.
 
 The Rust reference uses a Bulletproof inner-product argument. This port uses the
 compressed sigma-protocol already in the tree (`crypto/rp/csp`), because leg 2's
-linear form is `eq(alphaCol, .)`, which the **verifier computes itself** from the
+linear form is $`\mathrm{eq}(\alpha_{\mathrm{col}}, \cdot)`$, which the **verifier computes itself** from the
 public `alphaCol`. There is no secret vector to hide, so the Bulletproof machinery
 buys nothing over CSP — and it removes an entire protocol from the port.
 
@@ -962,9 +962,9 @@ buys nothing over CSP — and it removes an entire protocol from the port.
 |---|---|
 | `Commitment` | `sigmaPartial` |
 | `Generators` | the tier-1 generators `gens[:NumCols]` |
-| `LinearForm` | `eq(alphaCol, .)` — public, verifier-recomputable |
-| `Value` | `sigma`, the claimed `f(alpha)` |
-| witness | the folded row vector `a` |
+| `LinearForm` | $`\mathrm{eq}(\alpha_{\mathrm{col}}, \cdot)`$ — public, verifier-recomputable |
+| `Value` | `sigma`, the claimed $`f(\alpha)`$ |
+| witness | the folded row vector $`a`$ |
 
 Prover and verifier build the statement through **one shared function**
 (`columnStatement`), so there is a single conversion path and no possibility of the
@@ -981,18 +981,18 @@ leg as a row leg.
     alphaRow = alpha[m/2:]     // the LAST variables index rows
 
 This is inverted relative to the Rust reference, and it is **verified by probe, not
-assumed** — confirmed for `m = 2,3,4,5` against an independently computed `f(alpha)`.
+assumed** — confirmed for $`m = 2, 3, 4, 5`$ against an independently computed `f(alpha)`.
 
-The reason follows from the layout. Row `j` is the contiguous block
+The reason follows from the layout. Row $`j`$ is the contiguous block
 `f[j*cols : (j+1)*cols]` (section 7.1, no transpose), so the row index occupies the
 **high** bits of the flat index; and in the little-endian convention this package
 shares with `crypto/sumcheck`, the high bits are the **last** variables.
 
-**Getting this backwards is the worst bug available here**, because `eq` factorizes
+**Getting this backwards is the worst bug available here**, because $`\mathrm{eq}`$ factorizes
 over *any* split of the variables. Both assignments produce a completely
 self-consistent proof — it simply proves a claim about a different polynomial. No
 round-trip test can see it. It fails only against an independently computed
-`f(alpha)`, which is why `TestEvalRoundTripAndMatchesDirectEvaluation` asserts *two*
+$`f(\alpha)`$, which is why `TestEvalRoundTripAndMatchesDirectEvaluation` asserts *two*
 things: that verification accepts, **and** that `sigma` equals
 `FieldPoly.EvaluatePoint(alpha)`. The second assertion is the one that matters.
 
@@ -1032,7 +1032,7 @@ Measured on an Apple M4 Max, `-benchtime=1s`:
 | 12 | 64 | 12.58ms | 14.92ms | 1.14ms | 3.41ms |
 | 14 | 128 | 22.26ms | 26.99ms | 1.42ms | 6.04ms |
 
-**The cache matters overwhelmingly on the verifier, not the prover.** At `m = 14` it
+**The cache matters overwhelmingly on the verifier, not the prover.** At $`m = 14`$ it
 is a 4.3x speedup on verification (6.04ms to 1.42ms), where the boundary is **77%**
 of the uncached verifier's work; on the prover the same conversion is only 18%,
 because proving does enough other work to absorb it.
@@ -1057,14 +1057,14 @@ validation with a message about element curves — nothing that points at the ac
 mistake. The bridge therefore converts onto the **caller's** curve, never a
 hardcoded one.
 
-### 12.6 `m` is not recoverable from a `Commitment`
+### 12.6 $`m`$ is not recoverable from a `Commitment`
 
-The verifier takes `m` from `len(alpha)`, which is public input, and checks the
-commitment for consistency with it (`checkShape`). It cannot derive `m` from the
+The verifier takes $`m`$ from `len(alpha)`, which is public input, and checks the
+commitment for consistency with it (`checkShape`). It cannot derive $`m`$ from the
 commitment, and this is a genuine limitation rather than an oversight.
 
 `Commitment` carries `NumVars = log2(rows)` only. Every row count is produced by
-**two** different `m`:
+**two** different $`m`$:
 
     rows = 2   <-  m in {1, 2}
     rows = 4   <-  m in {3, 4}
@@ -1074,11 +1074,11 @@ commitment, and this is a genuine limitation rather than an oversight.
 They differ only in the column count, which the commitment does not carry. An earlier
 version of the code claimed to resolve the ambiguity by checking the row count; that
 check is **vacuous**, since both candidates reproduce it, and a test over
-`m = 1..16` caught it. `TestCheckShape` now pins the ambiguity so the claim cannot be
+$`m \in \{1, \ldots, 16\}`$ caught it. `TestCheckShape` now pins the ambiguity so the claim cannot be
 made again.
 
 A consequence worth knowing: an `alpha` one coordinate short is not always caught by
-the shape check — for `m = 4` and `m = 3` the row count is the same, so a 3-coordinate
+the shape check — for $`m = 4`$ and $`m = 3`$ the row count is the same, so a 3-coordinate
 `alpha` passes `checkShape` and is rejected downstream by leg 1 instead. The error is
 correct, but it names the round check rather than the length.
 
@@ -1096,7 +1096,7 @@ bind and no Pedersen tier to open. There is nothing for a second leg to prove.
 This section previously read "**neither verifier is sound against a prover who lies
 about the oracle**" — both reduced the claim to a residual sum-check claim at a random
 point and stopped there. **[Section 13](#13-folding-closing-the-claim) closes that**, via
-`ℓ` folding rounds, the reduced polynomial sent in plain, and `Q` consistency queries
+$`\ell`$ folding rounds, the reduced polynomial sent in plain, and $`Q`$ consistency queries
 against a committed coset oracle.
 
 The distinction that remains is which constructor was used. A commitment from
@@ -1107,8 +1107,8 @@ the oracle was checked. Both godocs say so at the function.
 
 Also still open, by design: zero-knowledge (CSP here is the non-ZK variant, tier 1 is
 non-hiding Pedersen, and leg 2's witness is the folded polynomial); `Setup`; batched
-`Eval` at several points; and the `O(n^(1/4))` variant, which needs a second folding
-layer over the *generator* oracle and is not what `k` controls.
+`Eval` at several points; and the $`O(n^{1/4})`$ variant, which needs a second folding
+layer over the *generator* oracle and is not what $`k`$ controls.
 
 ### 12.9 Mutation testing the two legs, and the gap it found
 
@@ -1119,7 +1119,7 @@ result.
 | Mutation | Caught by |
 |----------|-----------|
 | `alphaCol`/`alphaRow` swapped | round-trip, `sigmaPartial` cross-check, `foldRows`, validation |
-| verifier's leg-2 linear form uses `eq(alphaRow, .)` | round-trip, `EvalAffine` agreement, validation |
+| verifier's leg-2 linear form uses $`\mathrm{eq}(\alpha_{\mathrm{row}}, \cdot)`$ | round-trip, `EvalAffine` agreement, validation |
 | `sigma` computed over row 0 instead of the folded vector | round-trip, `EvalAffine` agreement, validation |
 | leg 1's error ignored | tampered `sigmaPartial`, tampered row leg, leg independence |
 | leg 2 reuses leg 1's domain separator | **nothing — see below** |
@@ -1151,9 +1151,9 @@ it is not a claim any test is failing to check.
 | Function | Input | Output | Used for |
 |----------|-------|--------|----------|
 | `NewGenerators(curve, gens)` | `[]bls12381.G1Affine` | `*Generators` | convert the generators once; hold on both sides |
-| `(*FieldOpeningHint).Eval(curve, gens, alpha)` | cached generators, point | `*EvalProof`, `sigma` | prove `f(alpha) = sigma` |
+| `(*FieldOpeningHint).Eval(curve, gens, alpha)` | cached generators, point | `*EvalProof`, `sigma` | prove $`f(\alpha) = \sigma`$ |
 | `VerifyEval(curve, c, gens, alpha, sigma, proof)` | commitment + public data | residual opening | check that claim (see 12.8) |
-| `(*GroupOpeningHint).EvalGroup(curve, alpha)` | point | `*GroupEvalProof`, `sigma` | prove `G(alpha) = sigma`, leg 1 only |
+| `(*GroupOpeningHint).EvalGroup(curve, alpha)` | point | `*GroupEvalProof`, `sigma` | prove $`G(\alpha) = \sigma`$, leg 1 only |
 | `VerifyEvalGroup(curve, c, alpha, sigma, proof)` | commitment + public data | residual opening | check that claim |
 | `EvalAffine` / `VerifyEvalAffine` | raw `[]bls12381.G1Affine` | as above | one-off calls; converts per call |
 
@@ -1185,37 +1185,37 @@ so the caller has the point and value the oracle queries must be made at.
 
 ## 13. Folding: Closing the Claim
 
-Sections 6.5 and 12.8 named the gap: both verifiers reduced `f̃(α) = σ` to a residual
+Sections 6.5 and 12.8 named the gap: both verifiers reduced $`\tilde f(\alpha) = \sigma`$ to a residual
 claim about a polynomial nobody had queried, so a prover free to choose the residual
 value could prove any sum. This section is what closes it.
 
-The shape, following WHIR: run `ℓ` rounds of folding on the group sum-check, send the
-reduced polynomial's `2^(m−ℓ)` coefficients **in plain**, test the reduced claim
-directly as a dot product against `eq` evaluations, and tie the whole thing to the
-committed oracle with `Q` consistency queries against coset openings.
+The shape, following WHIR: run $`\ell`$ rounds of folding on the group sum-check, send the
+reduced polynomial's $`2^{m-\ell}`$ coefficients **in plain**, test the reduced claim
+directly as a dot product against $`\mathrm{eq}`$ evaluations, and tie the whole thing to the
+committed oracle with $`Q`$ consistency queries against coset openings.
 
 ### 13.1 What a coset is, and why the flat codeword is the wrong object
 
-A coset for a folded-domain point `y` is, by definition
+A coset for a folded-domain point $`y`$ is, by definition
 
     { f(b, y, y², y⁴, …) : b ∈ {0,1}^ℓ }
 
-— boolean in the first `ℓ` coordinates, powers of `y` in the remaining `m−ℓ`.
+— boolean in the first $`\ell`$ coordinates, powers of $`y`$ in the remaining $`m - \ell`$.
 
 The natural-looking shortcut is to reuse `EncodeGroupOracle`, which runs one FFT over
-all of `L` and gives `codeword[i] = f̂(x) = f̃(x, x², x⁴, …)` at `x = ω^i`. The set
-`{x : x^(2^ℓ) = y}` sits at strided indices `{y + b·N/2^ℓ}`, and it **is** the fold's
+all of $`L`$ and gives $`\mathit{codeword}[i] = \hat f(x) = \tilde f(x, x^2, x^4, \ldots)`$ at $`x = \omega^i`$. The set
+$`\{x : x^{2^{\ell}} = y\}`$ sits at strided indices $`\{y + b \cdot N/2^{\ell}\}`$, and it **is** the fold's
 dependency closure — so it is easy to believe those entries are the coset. They are
 not. Every entry there is a full power-curve point; none of them is
-`f(b, powers(y))` with `b` boolean. Measured, three attempts to match the strided set
+`f(b, powers(y))` with $`b`$ boolean. Measured, three attempts to match the strided set
 against the definition scored 0/512, 1/512 and 1/512 — the stray matches being
-coincidences at `b = 0`.
+coincidences at $`b = 0`$.
 
-So the coset oracle is built **per slice**: for each `b ∈ {0,1}^ℓ`, encode the slice
-`f(b, ·)` over the folded domain `L^(2^ℓ)`, then gather index `y` across the `2^ℓ`
-resulting codewords. Slice `b` is `f[b + i·2^ℓ]`, because the first `ℓ` variables are
-the **low** index bits. Total work is the same as one big FFT — `2^ℓ` FFTs of size
-`2^(m+logRate−ℓ)`.
+So the coset oracle is built **per slice**: for each $`b \in \{0,1\}^{\ell}`$, encode the slice
+$`f(b, \cdot)`$ over the folded domain $`L^{2^{\ell}}`$, then gather index $`y`$ across the $`2^{\ell}`$
+resulting codewords. Slice $`b`$ is $`f[b + i \cdot 2^{\ell}]`$, because the first $`\ell`$ variables are
+the **low** index bits. Total work is the same as one big FFT — $`2^{\ell}`$ FFTs of size
+$`2^{m + \mathrm{logRate} - \ell}`$.
 
 `TestEncodeCosetsGivesSemanticCosets` pins the definition directly, against an
 independent `EvaluatePoint`. Two further tests pin the negative, because this is the
@@ -1226,19 +1226,19 @@ constructions are not permutations of each other, and
 
 ### 13.2 One primitive serves both checks
 
-With coset dimension `k = ℓ`, the payoff identity is
+With coset dimension $`k = \ell`$, the payoff identity is
 
     ⟨leaf[y], eq(r)⟩  ==  EncodeGroupOracle(reduced)[y]
 
-where `reduced` is `f` with its first `ℓ` variables bound to the round challenges `r`.
+where `reduced` is $`f`$ with its first $`\ell`$ variables bound to the round challenges $`r`$.
 Verified exact on m = 6, 8, 10, 12 and pinned by `TestFoldCosetMatchesReducedCodeword`.
 
-This is why `k = ℓ` is the right choice rather than an arbitrary one: a consistency
-query costs the verifier a **single `eq` dot product**, not `ℓ` fold rounds. The same
+This is why $`k = \ell`$ is the right choice rather than an arbitrary one: a consistency
+query costs the verifier a **single $`\mathrm{eq}`$ dot product**, not $`\ell`$ fold rounds. The same
 primitive tests the final reduced claim. One operation, two jobs.
 
 It also fixes the folding direction. `foldFirstGroup` substitutes the **first**
-variable, matching the coset slice indexing; reversing the `eq` order is a mutation
+variable, matching the coset slice indexing; reversing the $`\mathrm{eq}`$ order is a mutation
 the suite catches (`TestFoldRoundTrip`, `TestFoldRejectsAWrongAlpha`,
 `TestFoldRejectsALyingProver` all fail).
 
@@ -1253,14 +1253,14 @@ the suite catches (`TestFoldRoundTrip`, `TestFoldRejectsAWrongAlpha`,
 | 3 | each sampled coset is under the root **and** folds to the reduced codeword | `ErrCosetOpeningInvalid` |
 
 **Check 3 is the one step 13 exists for.** Checks 1 and 2 are internal consistency: a
-prover who folds an entirely different polynomial `f'` and sends `f'`'s reduced
+prover who folds an entirely different polynomial $`f'`$ and sends $`f'`$'s reduced
 coefficients satisfies both. Only check 3 ties the folding to the committed oracle.
 
 That distinction is not hypothetical — it was found by mutation. Deleting check 3 left
 the whole suite green, because the test named `TestFoldRejectsALyingProver` was in fact
 being caught by the Merkle check, not by the fold comparison. Closing it needed a
 strictly harder attack: `TestFoldRejectsAForeignFoldWithGenuineOpenings` substitutes
-*genuine* openings of the *real* committed oracle into a proof folded over `f'`, so the
+*genuine* openings of the *real* committed oracle into a proof folded over $`f'`$, so the
 Merkle paths verify, checks 1 and 2 pass (asserted explicitly via
 `verifyFoldRoundsOnly`), and check 3 is the only thing that can reject. See
 section 13.7.
@@ -1268,11 +1268,11 @@ section 13.7.
 ### 13.4 Soundness, and what is conjectured
 
 Per-query soundness error is the proximity parameter. Under the **capacity** bound it
-is `ρ`; under **Johnson** it is `√ρ`. So
+is $`\rho`$; under **Johnson** it is $`\sqrt{\rho}`$. So
 
     Q = ⌈λ / log₂(1/ρ)⌉
 
-At `λ = 128`, `ρ = 1/8`: **Q = 43** under capacity, 86 under Johnson. (43, not 42 — 42
+At $`\lambda = 128`$, $`\rho = 1/8`$: **Q = 43** under capacity, 86 under Johnson. (43, not 42 — 42
 gives 126 bits, and `TestFoldConfigQueryCount` pins the arithmetic.)
 
 **Capacity is conjectured; Johnson is what is provable.** `SoundnessRegime`'s godoc
@@ -1280,28 +1280,28 @@ says so at the type, not only here, because a caller choosing `Capacity` is choo
 conjecture and should not have to read the docs to find that out. `Johnson` is
 selectable for anyone who wants only proven bounds, at 2× the queries.
 
-The other soundness terms are negligible by comparison and do not affect `Q`: the
-folding rounds' Schwartz–Zippel error is ~2^−252, and `|L|/|F|` is ~2^−240. The query
+The other soundness terms are negligible by comparison and do not affect $`Q`$: the
+folding rounds' Schwartz–Zippel error is about $`2^{-252}`$, and $`\lvert L \rvert / \lvert \mathbb{F} \rvert`$ is about $`2^{-240}`$. The query
 term dominates, which is why the formula above is the whole story.
 
-### 13.5 `ℓ` is chosen by size, and the choice was measured
+### 13.5 $`\ell`$ is chosen by size, and the choice was measured
 
-Proof size trades off in `ℓ`: larger `ℓ` means fewer reduced coefficients
-(`2^(m−ℓ)`) but larger cosets (`Q·2^ℓ` points). `DefaultEll` picks the minimum.
+Proof size trades off in $`\ell`$: larger $`\ell`$ means fewer reduced coefficients
+($`2^{m-\ell}`$) but larger cosets ($`Q \cdot 2^{\ell}`$ points). `DefaultEll` picks the minimum.
 
 Rather than trust the size model it was derived from, the optimum was measured on real
 serialized bytes at m = 12 (`BenchmarkFoldProofSize`, counting compressed G1 plus
 digests):
 
-| ℓ | 1 | 2 | **3** | 4 | 5 | 6 |
+| $`\ell`$ | 1 | 2 | **3** | 4 | 5 | 6 |
 |---|---|---|---|---|---|---|
 | bytes | 122184 | 75928 | **58376** | 61368 | 87016 | 148760 |
 
-The minimum is at `ℓ = 3`, and `DefaultEll(12)` returns 3. The user's suggested
-starting point of `ℓ = m/2 − 1` is 5 at m = 12, which measures 49% larger — so the
+The minimum is at $`\ell = 3`$, and `DefaultEll(12)` returns 3. The user's suggested
+starting point of $`\ell = m/2 - 1`$ is 5 at m = 12, which measures 49% larger — so the
 size-optimal rule earns its place.
 
-`ℓ` must stay in `[1, m/2]`: `Q` cosets are opened, and beyond `m/2` the coset points
+$`\ell`$ must stay in $`[1, m/2]`$: $`Q`$ cosets are opened, and beyond $`m/2`$ the coset points
 dominate everything saved.
 
 ### 13.6 The verifier must not encode the whole domain
@@ -1316,14 +1316,14 @@ correct and badly wrong at once:
 | 10 | 402ms | 26.2ms | 65.9ms |
 | 12 | 901ms | 37.7ms | 297ms |
 
-The verifier was **15× slower than its own prover** at m = 8, and linear in the
+The verifier was **15× slower than its own prover** at $`m = 8`$, and linear in the
 polynomial size — the opposite of the point of a polynomial commitment scheme.
 Profiling attributed 80% to `mulGLV` with `EncodeGroupOracle` at 84% cumulative.
 
 `EncodeGroupOracleAt(p, dom, i)` evaluates the codeword at **one** index, building the
-power curve by `m` squarings from `dom.Elements[i]` and taking `⟨p, eq(curve)⟩`. The
-verifier now calls it `Q` times instead of encoding `2^(m−ℓ+logRate)` points. At m = 12
-that is 24× faster, and the growth changes character: 19→26→38ms is the `Q·2^ℓ` MSM
+power curve by $`m`$ squarings from `dom.Elements[i]` and taking `⟨p, eq(curve)⟩`. The
+verifier now calls it $`Q`$ times instead of encoding $`2^{m - \ell + \mathrm{logRate}}`$ points. At m = 12
+that is 24× faster, and the growth changes character: 19→26→38ms is the $`Q \cdot 2^{\ell}`$ MSM
 work plus Merkle paths, no longer the codeword.
 
 `TestEncodeGroupOracleAtMatchesFullEncoding` pins the equivalence against the butterfly
@@ -1332,44 +1332,44 @@ one. The full-domain encoder is still the right tool when most of the codeword i
 wanted — the prover uses it.
 
 One correction to the attribution above, since it was stated wrongly once: the residual
-19→26→38ms growth is dominated by **`Q·2^(m−ℓ)`**, the `Q` MSMs against the reduced
-polynomial, *not* by `Q·2^ℓ` plus Merkle paths. The reduced polynomial has `2^(m−ℓ)`
-coefficients and each of the `Q` queries runs a full-length MSM against it, so that term
+19→26→38ms growth is dominated by **$`Q \cdot 2^{m-\ell}`$**, the $`Q`$ MSMs against the reduced
+polynomial, *not* by $`Q \cdot 2^{\ell}`$ plus Merkle paths. The reduced polynomial has $`2^{m-\ell}`$
+coefficients and each of the $`Q`$ queries runs a full-length MSM against it, so that term
 is far larger than the coset folds. Getting the attribution right is what identified the
 batching below as worthwhile.
 
 #### Batching check 3
 
-Check 3 compares `Q` pairs of values. Both sides collapse into one equation, and the two
+Check 3 compares $`Q`$ pairs of values. Both sides collapse into one equation, and the two
 sides batch by **structurally opposite** mechanisms:
 
 | side | what is shared | what is combined | effect |
 |---|---|---|---|
-| reduced codeword | the point vector `Reduced` | the `eq` **scalar** vectors, summed with `γ^j` | `Q·2^(m−ℓ)` → `2^(m−ℓ)` group ops — asymptotic |
-| opened cosets | the scalar vector `eq(r)` | the **points**, concatenated | same point count, one length-`Q·2^ℓ` Pippenger instead of `Q` length-`2^ℓ` MSMs — constant factor |
+| reduced codeword | the point vector `Reduced` | the $`\mathrm{eq}`$ **scalar** vectors, summed with $`\gamma^j`$ | $`Q \cdot 2^{m-\ell}`$ → $`2^{m-\ell}`$ group ops — asymptotic |
+| opened cosets | the scalar vector $`\mathrm{eq}(r)`$ | the **points**, concatenated | same point count, one length-$`Q \cdot 2^{\ell}`$ Pippenger instead of $`Q`$ length-$`2^{\ell}`$ MSMs — constant factor |
 
 The codeword side wins asymptotically because the points are fixed and only scalars vary,
-so `Q` MSMs become one. The coset side cannot win that way — every query has different
-points — but a single long MSM lets Pippenger bucket properly, where `Q` separate
+so $`Q`$ MSMs become one. The coset side cannot win that way — every query has different
+points — but a single long MSM lets Pippenger bucket properly, where $`Q`$ separate
 length-8 MSMs are far too short for bucketing to pay. The combined check is
 
     ⟨concat(leaf_1..leaf_Q), γ^j ⊗ eq(r)⟩  ==  ⟨Reduced, Σ_j γ^j·eq(curve_j)⟩
 
-with the same `γ^j` ladder on both sides, computed once — deriving it twice would be two
+with the same $`\gamma^j`$ ladder on both sides, computed once — deriving it twice would be two
 places for the sides to drift apart.
 
 Measured, `BenchmarkFoldVerify`, `-benchtime=3x`:
 
-| m/ℓ | per-query | batched | speedup |
+| $`m/\ell`$ | per-query | batched | speedup |
 |---|---|---|---|
 | 8/1 | 19.9ms | 1.60ms | **12.4×** |
 | 10/2 | 26.2ms | 2.41ms | **10.9×** |
 | 12/3 | 38.2ms | 3.98ms | **9.6×** |
 
-Against the original full-encode verifier at m = 12 that is **901ms → 3.98ms, 226×**. The
+Against the original full-encode verifier at $`m = 12`$ that is **901ms → 3.98ms, 226×**. The
 verifier is now roughly 75× faster than its own prover rather than 15× slower.
 
-Batching does **not** remove the `Q·2^(m−ℓ)` plaintext term from the proof itself —
+Batching does **not** remove the $`Q \cdot 2^{m-\ell}`$ plaintext term from the proof itself —
 `Reduced` is still sent in full. Recursing instead of sending it in plain is WHIR proper,
 and is what would take the verifier to polylog; see 13.14.
 
@@ -1385,9 +1385,9 @@ check 3 left the suite green. The lesson is that a soundness test can pass for t
 wrong reason, and only mutation reveals which reason.
 
 **Gap 2 — the verifier could check fewer queries than it sampled.** Making the verifier
-sample `Q−1` indices left the suite green. The reason is subtle and worth recording:
-`sampleQueryIndices` draws sequentially, so sampling `Q−1` returns exactly the first
-`Q−1` of the honest `Q` list. A truncated verifier loop therefore agrees with the
+sample $`Q-1`$ indices left the suite green. The reason is subtle and worth recording:
+`sampleQueryIndices` draws sequentially, so sampling $`Q-1`$ returns exactly the first
+$`Q-1`$ of the honest $`Q`$ list. A truncated verifier loop therefore agrees with the
 honest prover on every query it looks at. The existing `len(proof.Queries) != cfg.Queries`
 guard does not help — that bounds what the prover **sends**, and this is about what the
 verifier **reads**. Every other negative test tampered with query `[0]`, which any
@@ -1410,15 +1410,15 @@ see.
   not a soundness gate; `TestFoldRejectsAShortCoset`'s godoc says so explicitly, since a
   test whose name implies it pins a check it does not pin is worse than no test.
 
-Mutations correctly caught: skipping the Merkle check (5 tests), reversing the `eq`
+Mutations correctly caught: skipping the Merkle check (5 tests), reversing the $`\mathrm{eq}`$
 order (3), dropping the reduced-claim check, dropping the round-sum check, dropping a
 round, swapping two queries, tampering with the reduced polynomial, and — confirming
 the transcript threading is load-bearing rather than cosmetic — having the verifier use
 an unchained transcript.
 
-**The unweighted-sum survivor, and why it is not a gap.** Setting every `γ` power to 1 —
+**The unweighted-sum survivor, and why it is not a gap.** Setting every $`\gamma`$ power to 1 —
 turning the batched combination into a plain unweighted sum — leaves the suite green. An
-unweighted sum normally *is* unsound: overshoot one query by δ, undershoot another by δ,
+unweighted sum normally *is* unsound: overshoot one query by $`\delta`$, undershoot another by $`\delta`$,
 and the totals agree while both queries are wrong. So this was first recorded as a real
 gap, and that was wrong. The cancelling attack is unconstructible here, for two
 independent reasons:
@@ -1427,22 +1427,22 @@ independent reasons:
    `VerifyMerkleProof` before the batched equation is evaluated.
 2. **`Reduced` cannot host it either**, even though it is sent in plain and bound by no
    root. It is absorbed into the transcript **before** the query indices are sampled. A
-   perturbation `d` must satisfy `⟨d, Σ_j eq(curve_j)⟩ = 0` to survive the unweighted sum —
-   but changing `Reduced` reshuffles the indices `j`, and therefore the very vectors `d`
+   perturbation $`d`$ must satisfy $`\langle d, \sum_j \mathrm{eq}(\mathit{curve}_j) \rangle = 0`$ to survive the unweighted sum —
+   but changing `Reduced` reshuffles the indices $`j`$, and therefore the very vectors $`d`$
    must be orthogonal to. The attacker needs a fixed point of the hash.
 
-Reason 2 was established by construction, not by argument. `d` supported on three
-coordinates and orthogonal to both `eqCur` (so check 2 stays silent) and `Σ_j eq(curve_j)`
+Reason 2 was established by construction, not by argument. $`d`$ supported on three
+coordinates and orthogonal to both `eqCur` (so check 2 stays silent) and $`\sum_j \mathrm{eq}(\mathit{curve}_j)`$
 exists and was built — the 3×3 cross product of the two constraint rows. Applying it made
 the verifier sample `[426 459 108 105]` instead of the indices the prover had opened, and
 the index guard rejected before the equation ran.
 
-So `γ` is **defence in depth, and the absorb-before-sample ordering is what is
+So $`\gamma`$ is **defence in depth, and the absorb-before-sample ordering is what is
 load-bearing**. That makes the ordering the thing worth pinning, and
 `TestFoldReducedIsAbsorbedBeforeQueriesAreSampled` pins it: it fails if `Reduced` is
 absorbed after `sampleQueryIndices`. If someone ever moves that absorption — to tidy the
 transcript, or to let the prover stream — the unweighted-sum mutation stops being
-equivalent and becomes a real break, and `γ` becomes the only thing standing in the way.
+equivalent and becomes a real break, and $`\gamma`$ becomes the only thing standing in the way.
 
 Four tests in this work passed for the wrong reason before being fixed, every one of them
 because `VerifyMerkleProof` rejects a tampered leaf before the check under test runs. That
@@ -1495,64 +1495,64 @@ Configuration has two contracts. A caller picks one by passing either the zero
 parameter from the size:
 - rate 1/8;
 - 43 queries (128 bits under the capacity bound);
-- the size-optimal coset dimension `Ell ≤ m/2`.
+- the size-optimal coset dimension $`\ell \le m/2`$.
 
-It is defined for **even `m` only**. `NewGroupSetup` with a zero config therefore needs
-`m` even. `NewFieldSetup` with a zero config needs `m ≡ 0 (mod 4)`, so that the balanced
+It is defined for **even $`m`$ only**. `NewGroupSetup` with a zero config therefore needs
+$`m`$ even. `NewFieldSetup` with a zero config needs $`m \equiv 0 \pmod 4`$, so that the balanced
 split gives two equal, even halves. `NewFieldSetupWithSplit` with a zero config needs an
 even row half. Outside these sizes the canonical path returns `ErrInvalidFoldConfig` and
 says to pass a custom configuration. That strictness is a choice of what to call
 canonical, not a property of the construction.
 
 **Custom: non-zero `FoldConfig`, correctness only.** `FoldConfig.Validate(m)` checks:
-- `m ≥ 1` and `1 ≤ Ell ≤ m`, so the coset dimension fits and `m − Ell` variables remain
+- $`m \ge 1`$ and $`1 \le \ell \le m`$, so the coset dimension fits and $`m - \ell`$ variables remain
   for the reduced polynomial;
-- `LogRate ≥ 1` and `Queries ≥ 1`;
+- $`\mathrm{LogRate} \ge 1`$ and $`Q \ge 1`$;
 - the soundness regime is known.
 
 A matrix split is checked only by `Split.Validate`: the halves must multiply back to
-`2^M`. So a custom configuration may:
+$`2^M`$. So a custom configuration may:
 - split the field polynomial's variables between rows and columns in any way;
 - split the group leg's variables between the coset (`Ell`) and the reduced polynomial
-  in any way, including `Ell > m/2`;
+  in any way, including $`\ell > m/2`$;
 - use an odd variable count anywhere.
 
 **Why parity was never needed.** Earlier versions enforced it as correctness:
-`FoldConfig.Validate` rejected odd `m`, and a separate `Split.ValidateForFold` rejected an
+`FoldConfig.Validate` rejected odd $`m`$, and a separate `Split.ValidateForFold` rejected an
 odd row half, on the belief that the coset layout halves the variables exactly. Nothing
 does:
 - the group sum-check's split at `DefaultSplit(m) = ⌊m/2⌋` is the prover's bookkeeping,
   which the verifier never sees;
-- the coset oracle needs only `1 ≤ Ell ≤ m`;
-- the field path puts `⌊m/2⌋` variables on the column (CSP) leg and `⌈m/2⌉` on the folded
+- the coset oracle needs only $`1 \le \ell \le m`$;
+- the field path puts $`\lfloor m/2 \rfloor`$ variables on the column (CSP) leg and $`\lceil m/2 \rceil`$ on the folded
   row leg, whatever their parity.
 
-`ValidateForFold` was removed, and `Validate`'s `Ell ≤ m/2` cap became part of
+`ValidateForFold` was removed, and `Validate`'s $`\ell \le m/2`$ cap became part of
 `DefaultEll`, where it is a proof-size heuristic. Three tests pin that these sizes are
 complete and reject a wrong value, a wrong point, a foreign proof, and a tampered
 sum-check round, fold round, reduced polynomial and partial evaluation:
 - `TestGroupPCSOddNumVars` (m = 5, 7, 9, 11);
 - `TestFieldPCSOddNumVarsWithACustomConfig` (m = 9, 10, 11, 13, including odd row
   halves);
-- `TestCustomFoldConfigEllAboveHalf` (Ell up to m − 3).
+- `TestCustomFoldConfigEllAboveHalf` ($`\ell`$ up to $`m - 3`$).
 
 The pivot protocol had been padding its group witness to satisfy the parity rule, which
-cost up to 2× in prover time at odd `log K`.
+cost up to 2× in prover time at odd $`\log K`$.
 
-**No drawability floor.** An earlier version also required `Queries ≤ NumCosets(m)`, on
-the belief that the `Q` consistency queries must be *distinct* cosets, which put the
+**No drawability floor.** An earlier version also required $`Q \le \mathrm{NumCosets}(m)`$, on
+the belief that the $`Q`$ consistency queries must be *distinct* cosets, which put the
 smallest canonical field size at m = 8 and rejected `DefaultFoldConfig(2)`. That
-requirement was not needed for soundness. The bound is for `Q` **independent** uniform
-queries: a prover whose oracle disagrees on a `δ` fraction of cosets escapes all of them
-with probability at most `(1 − δ)^Q`, and that event depends only on the set of cosets
-hit. So `sampleQueryIndices` makes `Q` independent draws and returns the distinct
+requirement was not needed for soundness. The bound is for $`Q`$ **independent** uniform
+queries: a prover whose oracle disagrees on a $`\delta`$ fraction of cosets escapes all of them
+with probability at most $`(1-\delta)^Q`$, and that event depends only on the set of cosets
+hit. So `sampleQueryIndices` makes $`Q`$ independent draws and returns the distinct
 indices in order of first appearance. The prover opens each once, and the verifier
-derives the same list and requires exactly one opening per entry. When `Q` approaches or
+derives the same list and requires exactly one opening per entry. When $`Q`$ approaches or
 exceeds the number of cosets, the draws cover most or all of the oracle, which is at
 least as sound.
 
 A consequence is that the number of openings, and so the proof size, varies slightly
-from proof to proof: collisions among the `Q` draws save an opening each.
+from proof to proof: collisions among the $`Q`$ draws save an opening each.
 
 `TestFieldFoldDefaultConfigBySize` pins the canonical sizes, and
 `TestFoldWithMoreQueriesThanCosets` runs group m = 2 and field m = 4, where the 43
@@ -1634,7 +1634,7 @@ alone), and `Prove() (*GroupEvalProof, bls12381.G1Affine, error)`.
 
 **The fold path does not encode the flat codeword.** `CommitGroupWithFold` and
 `CommitFieldWithFoldAt` used to run the `commitGroup` stage, a full Reed–Solomon
-encoding of `G`, and then `CommitCosets`, which encodes `G` again slice-wise for the
+encoding of $`G`$, and then `CommitCosets`, which encodes $`G`$ again slice-wise for the
 coset oracle. Nothing reads the flat codeword: the fold opens only the coset oracle,
 and `EncodeCosets` does not regroup the flat codeword (see
 `TestEncodeCosetsIsNotARegroupingOfTheFlatCodeword`). Profiling the pivot protocol
@@ -1661,17 +1661,17 @@ commitment was absorbed. `TestFieldPCSProveAtDeferredPoint` and
 
 **The four decisions it hides.**
 
-1. **The two paths need different domain sizes.** The group path encodes all `m`
-   variables and needs `2^(m + logRate)`; the field path folds only leg 1 and needs
-   `2^(rowVars + logRate)`. Passing `m` on the field path oversizes the domain by
-   `2^(m - rowVars) = 2^(m/2)` — 16x at `m = 8`, **256x** at `m = 16` — and all of it is
+1. **The two paths need different domain sizes.** The group path encodes all $`m`$
+   variables and needs $`2^{m + \mathrm{logRate}}`$; the field path folds only leg 1 and needs
+   $`2^{\mathrm{rowVars} + \mathrm{logRate}}`$. Passing $`m`$ on the field path oversizes the domain by
+   $`2^{m - \mathrm{rowVars}} = 2^{m/2}`$ — 16x at $`m = 8`$, **256x** at $`m = 16`$ — and all of it is
    paid in the commit FFT that dominates `NewFieldProver`. Not "twice", which is the
    natural guess from the usual halving and was what this section originally claimed.
 2. **A commitment must carry its coset oracle.** Folding is not a mode that can be
    switched off: the stages producing a nil-`Cosets` commitment are unexported, so the
    only way to hold one is to receive it from outside (deserialized, or from an older
    version). The facade's verifier constructors refuse exactly that.
-3. **`Alpha` has `m` coordinates, not `Commitment.NumVars`,** which counts only the row
+3. **`Alpha` has $`m`$ coordinates, not `Commitment.NumVars`,** which counts only the row
    half of the field matrix.
 4. **Generators are converted once.** `NewGenerators` caches a mathlib conversion worth
    15–18% of a prove and the bulk of a verify; building it per call is a silent ~6× on
@@ -1679,7 +1679,7 @@ commitment was absorbed. `TestFieldPCSProveAtDeferredPoint` and
 
 **Two guarantees, in opposite directions.** A prover from this API always commits *with*
 folding, and a verifier from this API *refuses* a commitment whose `Cosets` is nil. The
-second is the one the `0/1` return cannot express, so it is caught at construction:
+second is the one the $`0/1`$ return cannot express, so it is caught at construction:
 accepting such a commitment would make `Verify` report 1 for a proof that establishes
 nothing. `TestPCSProverAlwaysFolds` and `TestPCSVerifierRejectsUnfoldedCommitment` pin
 them; the round-trip tests alone cannot, because an unfolded proof verifies happily
@@ -1707,19 +1707,19 @@ to be different in kind, which is the useful part.
 
 *Validating the fold config against `numVars` instead of `rowVars` is an equivalent
 mutant.* `DefaultEll` returns `1` at every size the field path admits, and `Validate`'s
-two `m`-dependent constraints — `Ell <= m/2` and `Queries <= NumCosets(m)` — are both
+two $`m`$-dependent constraints — $`\ell \le m/2`$ and `Queries <= NumCosets(m)` — are both
 *looser* at the larger parameter. So `Validate(numVars)` accepts everything
 `Validate(rowVars)` does, and differs only for a hand-supplied `Ell` in
-`(rowVars/2, numVars/2]`. Recorded here so it is not later "fixed" with a test that
+$`(\mathrm{rowVars}/2,\ \mathrm{numVars}/2]`$. Recorded here so it is not later "fixed" with a test that
 cannot exist; the shipped code still validates against `rowVars`, because that is what
 the fold phase runs over and it makes the error name the right parameter.
 
 *Oversizing the domain was a real gap, and it is a **performance** defect, not a
 soundness one.* This is why no correctness test saw it: an oversized domain still
 encodes, commits, proves and verifies, because `EncodeFieldOracle` consumes the first
-`2^(rowVars+logRate)` points and ignores the rest, and the domain size is never absorbed
-into the transcript. Probed directly — a prover on a `2^11` domain at `m = 8` produces a
-proof that a verifier holding the correct `2^7` domain accepts, with no error at all. A
+$`2^{\mathrm{rowVars} + \mathrm{logRate}}`$ points and ignores the rest, and the domain size is never absorbed
+into the transcript. Probed directly — a prover on a $`2^{11}`$ domain at $`m = 8`$ produces a
+proof that a verifier holding the correct $`2^7`$ domain accepts, with no error at all. A
 cost that every functional test is blind to needs a structural assertion, so
 `TestPCSSetupSizesTheDomainByTheFoldedHalf` asserts `dom.LogSize` against
 `rowVars + LogRate` on the field path and against `m + LogRate` on the group path, the
@@ -1728,18 +1728,18 @@ the regression but only a human reading the numbers would have noticed it.
 
 ### 13.13 The outer matrix split as a parameter
 
-The field construction reads `f` as a `2^RowVars x 2^M1` matrix. `M1` — the number of
+The field construction reads $`f`$ as a $`2^{\mathrm{RowVars}} \times 2^{M_1}`$ matrix. $`M_1`$ — the number of
 **column** variables — decides how the work divides between the two legs:
 
-| | smaller `M1` | larger `M1` |
+| | smaller $`M_1`$ | larger $`M_1`$ |
 |---|---|---|
 | leg 2 (CSP, linear) | cheaper — fewer variables, shorter row MSMs | dearer |
-| generators needed | `2^M1`, fewer | more |
+| generators needed | $`2^{M_1}`$, fewer | more |
 | leg 1 / domain | larger row half, so a bigger FFT and Merkle tree | smaller |
 
-It was hardcoded to `m/2` until step 6. That is one point on the curve, and the Rust
+It was hardcoded to $`m/2`$ until step 6. That is one point on the curve, and the Rust
 reference treats it as a tuned free parameter, shipping asymmetric values per size
-(`m=18 → M1=8`, `m=22 → M1=9`, `m=26 → M1=11`).
+($`m = 18 \to M_1 = 8`$, $`m = 22 \to M_1 = 9`$, $`m = 26 \to M_1 = 11`$).
 
     type Split struct { M, M1 int }
     func DefaultMatrixSplit(m int) Split        // the balanced cut, M1 = m/2
@@ -1753,16 +1753,16 @@ reference treats it as a tuned free parameter, shipping asymmetric values per si
 folding alike. An earlier `ValidateForFold` demanded an even row half and was removed
 (13.10).
 
-**The split is on the wire.** `Commitment.ColVars` carries `M1`. This closes the
+**The split is on the wire.** `Commitment.ColVars` carries $`M_1`$. This closes the
 ambiguity `checkShape` used to document: `NumVars` is `log2` of the *row* count, so it
-pins down `RowVars` and nothing else, and every row count is consistent with many `M1`.
+pins down `RowVars` and nothing else, and every row count is consistent with many $`M_1`$.
 Before the field existed the verifier had to take the total variable count from `alpha`
 and divide it at the balanced cut, and could not detect a prover that had cut elsewhere.
 `ColVars == 0` means "not stated" — a group commitment, or a field commitment from
 before the field — and falls back to the balanced split, so older commitments verify
 exactly as they did.
 
-**Why a round trip is nearly worthless as the test here.** `eq` factorizes over *any*
+**Why a round trip is nearly worthless as the test here.** $`\mathrm{eq}`$ factorizes over *any*
 split, so a prover and verifier that both divide `alpha` at the wrong point produce a
 proof that verifies against itself perfectly — for a different polynomial than the one
 committed. `Verify() == 1` cannot see it. `TestFieldPCSSplitMakesOddSizesUsable`
@@ -1778,20 +1778,20 @@ prover re-deriving the split instead of using the committed one; the verifier di
 
 **Not yet done.** `DefaultEll` is still computed against
 `RowVars` without regard to how the split was chosen (13.10), and no benchmark has
-established whether `m/2` is optimal for *our* cost model. It will not match Rust's
-`m/2 − 2`: that reference also folds the generator oracle (its `l2`), which keeps a
+established whether $`m/2`$ is optimal for *our* cost model. It will not match Rust's
+$`m/2 - 2`$: that reference also folds the generator oracle (its `l2`), which keeps a
 larger column half cheap, whereas here every column variable is full linear CSP cost.
 Revisit the default when leg 2 folding lands, not before.
 
 ### 13.14 What is still open
 
 Deferred by design, unchanged from section 12.8: zero-knowledge; `Setup`; batched `Eval`
-at several points; serialization; and the `O(n^(1/4))` variant, which needs a second
-folding layer over the *generator* oracle and is not what `k` controls.
+at several points; serialization; and the $`O(n^{1/4})`$ variant, which needs a second
+folding layer over the *generator* oracle and is not what $`k`$ controls.
 
 One thing the batching in 13.6 does **not** fix: the verifier is still linear in
-`2^(m−ℓ)`, because `Reduced` is sent in plain and the verifier must touch every
-coefficient of it. Batching removed the factor of `Q`, not the term. Sending `Reduced` is
+$`2^{m-\ell}`$, because `Reduced` is sent in plain and the verifier must touch every
+coefficient of it. Batching removed the factor of $`Q`$, not the term. Sending `Reduced` is
 the deliberate stopping point of this step — the claim is closed and sound, at one round
 of folding. Recursing instead of sending it in plain is WHIR proper: fold again over the
 reduced oracle rather than revealing it, repeat until the polynomial is small enough to
