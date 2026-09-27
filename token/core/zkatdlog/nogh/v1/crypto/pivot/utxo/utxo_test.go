@@ -165,15 +165,55 @@ func TestEquationsHoldOnHonestInstance(t *testing.T) {
 			z[k].Add(&z[k], &t)
 		}
 	}
-	var got fr.Element
-	for _, m := range phi {
-		v := m.Coeff
-		for _, idx := range m.Vars {
-			v.Mul(&v, &z[idx])
-		}
-		got.Add(&got, &v)
-	}
+	got := phi(z)
 	assert.True(t, got.IsZero(), "field constraint")
+}
+
+// TestFieldConstraintMatchesExpansion checks Phi, written as a function, against
+// its expansion into monomials at random form values,
+//
+//	Z_0 + xi Z_1 + xi^2 Z_2 - xi^2 Z_4^2 + xi^2 Z_4 + xi^3 Z_3 - xi^3 Z_5^2 + xi^3 Z_5,
+//
+// so a sign or power slip in the function cannot hide behind honest witnesses,
+// on which both sides are zero.
+func TestFieldConstraintMatchesExpansion(t *testing.T) {
+	e := loadEnv(t)
+	var eta, xi fr.Element
+	_, _ = eta.SetRandom()
+	_, _ = xi.SetRandom()
+	forms, phi := e.params.fieldConstraint(eta, xi)
+	require.Len(t, forms, 6)
+
+	var xi2, xi3 fr.Element
+	xi2.Square(&xi)
+	xi3.Mul(&xi2, &xi)
+	for range 8 {
+		z := make([]fr.Element, 6)
+		for k := range z {
+			_, _ = z[k].SetRandom()
+		}
+		var want, t2 fr.Element
+		want.Set(&z[0])
+		add := func(c fr.Element, vars ...int) {
+			v := c
+			for _, i := range vars {
+				v.Mul(&v, &z[i])
+			}
+			want.Add(&want, &v)
+		}
+		add(xi, 1)
+		add(xi2, 2)
+		t2.Neg(&xi2)
+		add(t2, 4, 4)
+		add(xi2, 4)
+		add(xi3, 3)
+		t2.Neg(&xi3)
+		add(t2, 5, 5)
+		add(xi3, 5)
+
+		got := phi(z)
+		require.True(t, got.Equal(&want))
+	}
 }
 
 func TestAggregateRoundTrip(t *testing.T) {

@@ -14,46 +14,121 @@ import (
 	"github.com/LFDT-Panurus/panurus/token/core/zkatdlog/nogh/v1/crypto/rp/csp"
 )
 
-// Sum-of-products claims
+// Composite claims
 //
-// A Claim is a single product f_1 * ... * f_k. Some protocols need a sum of
-// structurally different products, which a single Claim cannot express:
+// A Claim is a single product f_1 * ... * f_k. Some protocols need a composite of
+// several multilinears, which a single Claim cannot express:
 //
-//	H = sum over x in {0,1}^mu of  sum_j c_j * prod_{i in S_j} h_i(x)
+//	H = sum over x in {0,1}^mu of  Phi(h_1(x), ..., h_p(x))
 //
-// where the h_i are multilinear field polynomials and each S_j is a multiset of
-// indices into them. This is exactly a polynomial Phi(h_1, ..., h_p) with public
-// coefficients, written as its list of monomials, so MultiClaim is the wrapper that
-// lifts sum-check from one product to Phi of several multilinears.
+// where the h_i are multilinear field polynomials and Phi is a public polynomial of
+// low total degree. MultiClaim is the wrapper that lifts sum-check from one product
+// to such a Phi.
 //
-// The polynomials live in a shared pool and the terms refer to them by index. A
-// polynomial used by several terms, or several times in one term (a square), is
-// therefore stored and folded once, and the Opening reports one value per pool
-// entry -- which is what a caller needs to discharge the residual claim.
+// The polynomials live in a shared pool and Phi reads them by position. A
+// polynomial Phi uses several times, or squares, is therefore stored and folded
+// once, and the Opening reports one value per pool entry -- which is what a caller
+// needs to discharge the residual claim.
 //
-// Only field polynomials are supported. The per-round degree is the largest term
-// degree; shorter terms are evaluated at the same points, which is equivalent to
-// padding them.
+// Phi is a Composition, of which the package provides two:
+//
+//   - Terms, Phi as a list of products c_j * prod_{i in S_j} h_i. Its degree is
+//     read off the terms.
+//   - Func, Phi as a function evaluated point by point, with a declared degree.
+//     This is usually simpler to write, e.g. X(1-Y)(1-Z) + XZ is one line.
+//
+// Only field polynomials are supported.
 
-// Term is one product of a MultiClaim: Coeff times the product of the pool
-// polynomials named by Factors. An index may repeat, which raises that polynomial
-// to a power. Factors must be non-empty.
+// Composition is the polynomial Phi of a MultiClaim.
+//
+// The prover only ever evaluates Phi at points: in each round it steps the pool
+// polynomials along a line and calls Evaluate at t = 0, 1, ..., Degree(). The
+// verifier calls it once, to close the residual claim.
+type Composition interface {
+	// Degree returns an upper bound on the total degree of Phi, which is the
+	// degree of every round polynomial. An understated degree breaks
+	// completeness, since honest round polynomials then do not fit, but not
+	// soundness, whose error per round is max(declared, true degree) / |F|.
+	Degree() int
+	// Evaluate returns Phi at vals, one value per pool polynomial. It must not
+	// modify or retain vals.
+	Evaluate(vals []fr.Element) fr.Element
+}
+
+// Term is one product of a Terms composition: Coeff times the product of the
+// pool polynomials named by Factors. An index may repeat, which raises that
+// polynomial to a power. Factors must be non-empty.
 type Term struct {
 	Coeff   fr.Element
 	Factors []int
 }
 
+// Terms is Phi written as a sum of products,
+//
+//	Phi(h) = sum_j Terms[j].Coeff * prod_{i in Terms[j].Factors} h_i.
+//
+// The indices are checked against the pool when the claim is proved.
+type Terms []Term
+
+// Degree returns the largest number of factors of any term.
+func (t Terms) Degree() int {
+	d := 0
+	for _, term := range t {
+		if len(term.Factors) > d {
+			d = len(term.Factors)
+		}
+	}
+
+	return d
+}
+
+// Evaluate returns the sum of products at vals. An index outside vals
+// contributes a zero factor; ProveMulti rejects such terms up front, and
+// EvaluateTerms reports them as an error.
+func (t Terms) Evaluate(vals []fr.Element) fr.Element {
+	var out fr.Element
+	for _, term := range t {
+		prod := term.Coeff
+		for _, f := range term.Factors {
+			if f < 0 || f >= len(vals) {
+				prod.SetZero()
+
+				break
+			}
+			prod.Mul(&prod, &vals[f])
+		}
+		out.Add(&out, &prod)
+	}
+
+	return out
+}
+
+// Func is Phi given as a function, with its degree declared by the caller.
+//
+// F receives one value per pool polynomial and must not modify or retain the
+// slice. Deg must bound the total degree of F; see Composition.Degree.
+type Func struct {
+	Deg int
+	F   func(vals []fr.Element) fr.Element
+}
+
+// Degree returns the declared degree.
+func (f Func) Degree() int { return f.Deg }
+
+// Evaluate returns F(vals).
+func (f Func) Evaluate(vals []fr.Element) fr.Element { return f.F(vals) }
+
 // MultiClaim is the claim that the hypercube sum of
 //
-//	p(x) = sum_j Terms[j].Coeff * prod_{i in Terms[j].Factors} Polys[i](x)
+//	p(x) = Phi(Polys[0](x), ..., Polys[p-1](x))
 //
 // equals the asserted value. All pool polynomials must have the same number of
-// variables, and every pool polynomial need not be used.
+// variables, and Phi need not use every one of them.
 //
 // ProveMulti folds a deep copy, so the caller's tables are not modified.
 type MultiClaim struct {
 	Polys []FieldPoly
-	Terms []Term
+	Phi   Composition
 }
 
 // NumVars returns the number of variables shared by the pool polynomials.
@@ -65,16 +140,13 @@ func (c *MultiClaim) NumVars() int {
 	return c.Polys[0].NumVars()
 }
 
-// Degree returns the per-round degree, the largest number of factors of any term.
+// Degree returns the per-round degree, the degree of Phi.
 func (c *MultiClaim) Degree() int {
-	d := 0
-	for _, t := range c.Terms {
-		if len(t.Factors) > d {
-			d = len(t.Factors)
-		}
+	if c.Phi == nil {
+		return 0
 	}
 
-	return d
+	return c.Phi.Degree()
 }
 
 // Shape returns the public shape a verifier needs for this claim.
@@ -86,10 +158,21 @@ func (c *MultiClaim) Shape() MultiShape {
 // evals, one per pool entry. It is how a caller closes the argument: compare
 // Evaluate(values from the commitment scheme) with the verifier's Product.
 func (c *MultiClaim) Evaluate(evals []fr.Element) (fr.Element, error) {
-	return EvaluateTerms(c.Terms, evals)
+	if c.Phi == nil {
+		return fr.Element{}, ErrNoFactors
+	}
+	if len(evals) != len(c.Polys) {
+		return fr.Element{}, errors.Wrapf(ErrFactorIndex, "got %d values for a pool of %d", len(evals), len(c.Polys))
+	}
+	if t, ok := c.Phi.(Terms); ok {
+		return EvaluateTerms(t, evals)
+	}
+
+	return c.Phi.Evaluate(evals), nil
 }
 
-// EvaluateTerms returns sum_j terms[j].Coeff * prod_{i in terms[j].Factors} evals[i].
+// EvaluateTerms returns sum_j terms[j].Coeff * prod_{i in terms[j].Factors} evals[i],
+// reporting an index outside evals as an error.
 //
 // It is exported separately from MultiClaim.Evaluate because a verifier holds the
 // terms but not the pool polynomials.
@@ -111,8 +194,14 @@ func EvaluateTerms(terms []Term, evals []fr.Element) (fr.Element, error) {
 
 // validate checks the structural invariants the protocol relies on.
 func (c *MultiClaim) validate() error {
-	if len(c.Polys) == 0 || len(c.Terms) == 0 {
+	if len(c.Polys) == 0 || c.Phi == nil {
 		return ErrNoFactors
+	}
+	if c.Phi.Degree() < 1 {
+		return errors.Wrapf(ErrNoFactors, "phi has degree %d, need at least 1", c.Phi.Degree())
+	}
+	if f, ok := c.Phi.(Func); ok && f.F == nil {
+		return errors.Wrap(ErrNoFactors, "phi function is nil")
 	}
 	nv := -1
 	for i, p := range c.Polys {
@@ -131,7 +220,8 @@ func (c *MultiClaim) validate() error {
 	if nv == 0 {
 		return errors.Wrap(ErrNumVarsMismatch, "pool polynomials must have at least one variable")
 	}
-	for j, t := range c.Terms {
+	terms, _ := c.Phi.(Terms)
+	for j, t := range terms {
 		if len(t.Factors) == 0 {
 			return errors.Wrapf(ErrNoFactors, "term %d has no factors", j)
 		}
@@ -146,7 +236,7 @@ func (c *MultiClaim) validate() error {
 }
 
 // MultiShape is the public shape of a MultiClaim: what a verifier needs without
-// the polynomials. The terms are not part of it, since the round checks do not
+// the polynomials. Phi is not part of it, since the round checks do not
 // depend on them; the caller uses them only to close the residual claim.
 type MultiShape struct {
 	NumVars int
@@ -222,7 +312,7 @@ func proveMultiWith(curve *mathlib.Curve, claim *MultiClaim, tr *csp.Transcript)
 	challenges := make([]*mathlib.Zr, 0, numVars)
 
 	for round := range numVars {
-		evals := multiRoundEvals(work, claim.Terms, degree)
+		evals := multiRoundEvals(work, claim.Phi, degree)
 
 		out := make([]*mathlib.Zr, len(evals))
 		for i := range evals {
@@ -259,12 +349,12 @@ func proveMultiWith(curve *mathlib.Curve, claim *MultiClaim, tr *csp.Transcript)
 
 // multiRoundEvals computes the round polynomial
 //
-//	q(t) = sum over x in {0,1}^{mu-1} of sum_j c_j * prod_{i in S_j} h_i(t, x)
+//	q(t) = sum over x in {0,1}^{mu-1} of Phi(h_1(t, x), ..., h_p(t, x))
 //
 // at t = 0, 1, ..., degree. Each pool polynomial is stepped along its line once per
-// point and shared by every term that uses it, so the cost per point is one
-// addition per pool entry plus one multiplication per factor occurrence.
-func multiRoundEvals(polys []FieldPoly, terms []Term, degree int) []fr.Element {
+// point, so the cost per point is one addition per pool entry plus one evaluation
+// of Phi.
+func multiRoundEvals(polys []FieldPoly, phi Composition, degree int) []fr.Element {
 	half := len(polys[0]) / 2
 	out := make([]fr.Element, degree+1)
 	cur := make([]fr.Element, len(polys))
@@ -276,13 +366,8 @@ func multiRoundEvals(polys []FieldPoly, terms []Term, degree int) []fr.Element {
 			slope[i].Sub(&p[x+half], &p[x])
 		}
 		for t := range degree + 1 {
-			for _, term := range terms {
-				prod := term.Coeff
-				for _, f := range term.Factors {
-					prod.Mul(&prod, &cur[f])
-				}
-				out[t].Add(&out[t], &prod)
-			}
+			v := phi.Evaluate(cur)
+			out[t].Add(&out[t], &v)
 			if t == degree {
 				break
 			}
@@ -299,7 +384,7 @@ func multiRoundEvals(polys []FieldPoly, terms []Term, degree int) []fr.Element {
 //
 // As with Verify, a nil error means only that the sum follows from the returned
 // Opening. Opening.Product is p(R); the caller closes the argument by checking it
-// against EvaluateTerms applied to the pool values its commitment scheme opens to.
+// against Phi applied to the pool values its commitment scheme opens to.
 func VerifyMulti(curve *mathlib.Curve, shape MultiShape, proof *Proof) (*Opening, error) {
 	if curve == nil {
 		return nil, ErrNilCurve

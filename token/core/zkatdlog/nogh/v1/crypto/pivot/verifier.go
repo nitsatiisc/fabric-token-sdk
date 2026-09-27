@@ -235,14 +235,14 @@ func (v *verifier) sc3() error {
 		return failed("SC3 sum: the K field constraints do not hold")
 	}
 	open, err := sumcheck.VerifyMultiWithTranscript(v.setup.curve,
-		sumcheck.MultiShape{NumVars: s.LogK, Degree: 1 + v.rel.phiDegree()}, v.proof.SC3, v.tr)
+		sumcheck.MultiShape{NumVars: s.LogK, Degree: 1 + v.rel.PhiDegree}, v.proof.SC3, v.tr)
 	if err != nil {
 		return errors.WithMessage(err, "SC3")
 	}
 	v.rhoP = tablePoint(open.R)
 	absorbFrs(v.tr, v.proof.FormEvals)
 
-	want := phiValue(v.rel.Phi, v.proof.FormEvals)
+	want := v.rel.Phi(v.proof.FormEvals)
 	eqP := eqEval(v.rhoP, v.tau)
 	want.Mul(&want, &eqP)
 	if got := fromZr(open.Product); !got.Equal(&want) {

@@ -205,20 +205,6 @@ func formLinearTable(f AffineForm, n int) []fr.Element {
 	return out
 }
 
-// phiValue returns Phi at the form values z.
-func phiValue(phi []Monomial, z []fr.Element) fr.Element {
-	var out fr.Element
-	for _, m := range phi {
-		t := m.Coeff
-		for _, v := range m.Vars {
-			t.Mul(&t, &z[v])
-		}
-		out.Add(&out, &t)
-	}
-
-	return out
-}
-
 // fromZr converts a mathlib scalar into a field element.
 func fromZr(z *mathlib.Zr) fr.Element {
 	var e fr.Element

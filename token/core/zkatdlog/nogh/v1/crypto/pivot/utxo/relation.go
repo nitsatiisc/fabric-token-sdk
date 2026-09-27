@@ -9,6 +9,7 @@ package utxo
 import (
 	"math/big"
 	"sort"
+	"strconv"
 
 	bls12381 "github.com/consensys/gnark-crypto/ecc/bls12-381"
 	"github.com/consensys/gnark-crypto/ecc/bls12-381/fr"
@@ -186,6 +187,8 @@ func (p *Params) buildRelation(sizes pivot.Sizes, eta, xi fr.Element) *pivot.Rel
 		G0:       scaleG1(p.g1, g0Coeff),
 	}
 	rel.Forms, rel.Phi = p.fieldConstraint(eta, xi)
+	rel.PhiDegree = 2
+	rel.PhiLabel = p.phiLabel()
 
 	return rel
 }
@@ -213,8 +216,11 @@ func sparse(m map[[2]int]fr.Element) []pivot.SparseEntry {
 //	L_j     = vout_j - sum_{l=1}^{kappa} 2^{l-1} a_{j,l}                 (U5)
 //	L_{2+j} = sum_{l in S} nu_l b_{j,l},   S = {0, kappa+1, ..., 2kappa}  b_j(eta)
 //	L_{4+j} = sum_{l=0}^{kappa} mu_l a_{j,l}                              a_j(eta)
-//	Phi     = Z_0 + xi Z_1 + xi^2 (Z_2 - Z_4^2 + Z_4) + xi^3 (Z_3 - Z_5^2 + Z_5)
-func (p *Params) fieldConstraint(eta, xi fr.Element) ([]pivot.AffineForm, []pivot.Monomial) {
+//	Phi     = Z_0 + xi Z_1 + xi^2 (Z_2 + Z_4 (1 - Z_4)) + xi^3 (Z_3 + Z_5 (1 - Z_5))
+//
+// Phi has degree 2. Its coefficients are powers of xi and its forms depend on eta,
+// both transcript challenges, so the label only has to name its shape and kappa.
+func (p *Params) fieldConstraint(eta, xi fr.Element) ([]pivot.AffineForm, func([]fr.Element) fr.Element) {
 	kappa := p.Bits
 	mu := lagrange(eta, kappa)
 	nu := lagrange(eta, 2*kappa)
@@ -249,23 +255,34 @@ func (p *Params) fieldConstraint(eta, xi fr.Element) ([]pivot.AffineForm, []pivo
 	var xi2, xi3 fr.Element
 	xi2.Square(&xi)
 	xi3.Mul(&xi2, &xi)
-	neg := func(e fr.Element) fr.Element {
-		e.Neg(&e)
+	// z + a (1 - a), the range identity b = a (a - 1) moved to one side.
+	rangeTerm := func(z, a fr.Element) fr.Element {
+		var t fr.Element
+		t.SetOne()
+		t.Sub(&t, &a).Mul(&t, &a)
 
-		return e
+		return *t.Add(&t, &z)
 	}
-	phi := []pivot.Monomial{
-		{Coeff: fr.One(), Vars: []int{0}},
-		{Coeff: xi, Vars: []int{1}},
-		{Coeff: xi2, Vars: []int{2}},
-		{Coeff: neg(xi2), Vars: []int{4, 4}},
-		{Coeff: xi2, Vars: []int{4}},
-		{Coeff: xi3, Vars: []int{3}},
-		{Coeff: neg(xi3), Vars: []int{5, 5}},
-		{Coeff: xi3, Vars: []int{5}},
+	phi := func(z []fr.Element) fr.Element {
+		out := z[0]
+		var t fr.Element
+		t.Mul(&xi, &z[1])
+		out.Add(&out, &t)
+		t = rangeTerm(z[2], z[4])
+		t.Mul(&t, &xi2)
+		out.Add(&out, &t)
+		t = rangeTerm(z[3], z[5])
+		t.Mul(&t, &xi3)
+
+		return *out.Add(&out, &t)
 	}
 
 	return forms, phi
+}
+
+// phiLabel names the field constraint in the transcript: its shape and kappa.
+func (p *Params) phiLabel() []byte {
+	return []byte("PivotUTXO/range-and-sum/v1/kappa=" + strconv.Itoa(p.Bits))
 }
 
 // bigOf returns s as a big integer, for gnark's scalar multiplications.

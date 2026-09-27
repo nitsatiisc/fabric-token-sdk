@@ -286,20 +286,15 @@ func (p *prover) sc2() error {
 	return nil
 }
 
-// phiTerms returns SC3's terms over the pool [eq(., tau), L~_1, ..., L~_tau]: every
-// monomial of Phi multiplied by the eq factor.
-func phiTerms(phi []Monomial) []sumcheck.Term {
-	terms := make([]sumcheck.Term, len(phi))
-	for m, mono := range phi {
-		factors := make([]int, 0, 1+len(mono.Vars))
-		factors = append(factors, 0)
-		for _, v := range mono.Vars {
-			factors = append(factors, 1+v)
-		}
-		terms[m] = sumcheck.Term{Coeff: mono.Coeff, Factors: factors}
-	}
+// sc3Phi returns SC3's composition over the pool [eq(., tau), L~_1, ..., L~_tau]:
+// the eq factor times Phi of the form values.
+func sc3Phi(rel *Relation) sumcheck.Func {
+	return sumcheck.Func{Deg: 1 + rel.PhiDegree, F: func(v []fr.Element) fr.Element {
+		out := rel.Phi(v[1:])
+		out.Mul(&out, &v[0])
 
-	return terms
+		return out
+	}}
 }
 
 // sc3 runs the zero-check sum_z eq(z,tau) Phi(L~_1(z), ...) = 0 over log K
@@ -320,7 +315,7 @@ func (p *prover) sc3() error {
 	}
 
 	proof, open, err := sumcheck.ProveMultiWithTranscript(p.setup.curve,
-		&sumcheck.MultiClaim{Polys: pool, Terms: phiTerms(p.rel.Phi)}, p.tr)
+		&sumcheck.MultiClaim{Polys: pool, Phi: sc3Phi(p.rel)}, p.tr)
 	if err != nil {
 		return errors.WithMessage(err, "SC3")
 	}
@@ -400,7 +395,7 @@ func (p *prover) sc4() error {
 	}
 
 	proof, open, err := sumcheck.ProveMultiWithTranscript(p.setup.curve,
-		&sumcheck.MultiClaim{Polys: pool, Terms: terms}, p.tr)
+		&sumcheck.MultiClaim{Polys: pool, Phi: sumcheck.Terms(terms)}, p.tr)
 	if err != nil {
 		return errors.WithMessage(err, "SC4")
 	}

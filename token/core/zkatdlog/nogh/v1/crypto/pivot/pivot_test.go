@@ -113,12 +113,17 @@ func testRelation(t *testing.T, s Sizes, withPhi bool) *Relation {
 			{Coeffs: []LinearEntry{{Col: 2, Val: one}}, Const: frU(5)},
 			{Coeffs: []LinearEntry{{Col: 3, Val: one}}},
 		}
-		rel.Phi = []Monomial{
-			{Coeff: one, Vars: []int{0, 1}},
-			{Coeff: frNeg(1), Vars: []int{2}},
-			{Coeff: frU(7), Vars: []int{3, 3}},
-			{Coeff: frNeg(7), Vars: []int{3}},
+		// Phi = Z_0 Z_1 - Z_2 + 7 Z_3 (Z_3 - 1).
+		seven := frU(7)
+		rel.Phi = func(z []fr.Element) fr.Element {
+			var out, t fr.Element
+			out.Mul(&z[0], &z[1]).Sub(&out, &z[2])
+			t.Sub(&z[3], &one).Mul(&t, &z[3]).Mul(&t, &seven)
+
+			return *out.Add(&out, &t)
 		}
+		rel.PhiDegree = 2
+		rel.PhiLabel = []byte("pivot-test/phi/v1")
 	}
 
 	return rel
@@ -205,7 +210,10 @@ func checkInstance(rel *Relation, s Sizes, w []fr.Element, g, x []bls12381.G1Aff
 	for k, f := range rel.Forms {
 		z[k] = formValue(f, w)
 	}
-	phi := phiValue(rel.Phi, z)
+	var phi fr.Element
+	if rel.Phi != nil {
+		phi = rel.Phi(z)
+	}
 
 	return acc.IsInfinity(), phi.IsZero()
 }
@@ -443,13 +451,14 @@ func TestMalformedProof(t *testing.T) {
 func TestRelationFromPostCommitmentChallenge(t *testing.T) {
 	f := newFixture(t, sizesDefault, SetupOptions{}, true)
 
-	// Scale every monomial of Phi by the challenge: the constraint still holds.
+	// Scale Phi by the challenge: the constraint still holds.
 	withChallenge := func(xi fr.Element) *Relation {
 		r := *f.rel
-		r.Phi = make([]Monomial, len(f.rel.Phi))
-		for m, mono := range f.rel.Phi {
-			r.Phi[m] = mono
-			r.Phi[m].Coeff.Mul(&mono.Coeff, &xi)
+		base := f.rel.Phi
+		r.Phi = func(z []fr.Element) fr.Element {
+			out := base(z)
+
+			return *out.Mul(&out, &xi)
 		}
 
 		return &r
@@ -539,9 +548,19 @@ func TestInputValidation(t *testing.T) {
 	require.ErrorIs(t, err, ErrInvalidRelation)
 
 	badRel = *f.rel
-	badRel.Phi = []Monomial{{Coeff: fr.One(), Vars: []int{9}}}
+	badRel.PhiDegree = 0
 	_, _, err = Prove(f.setup, &badRel, f.st, c, tr)
-	require.ErrorIs(t, err, ErrInvalidRelation)
+	require.ErrorIs(t, err, ErrInvalidRelation, "Phi without a degree")
+
+	badRel = *f.rel
+	badRel.PhiLabel = nil
+	_, _, err = Prove(f.setup, &badRel, f.st, c, tr)
+	require.ErrorIs(t, err, ErrInvalidRelation, "Phi without a label")
+
+	badRel = *f.rel
+	badRel.Phi = nil
+	_, _, err = Prove(f.setup, &badRel, f.st, c, tr)
+	require.ErrorIs(t, err, ErrInvalidRelation, "a degree and label without Phi")
 
 	_, _, err = Prove(f.setup, f.rel, &Statement{Public: f.st.Public[:3]}, c, tr)
 	require.ErrorIs(t, err, ErrInvalidStatement)
@@ -552,4 +571,17 @@ func TestInputValidation(t *testing.T) {
 	require.ErrorIs(t, err, ErrInvalidRelation)
 	_, _, err = Prove(f.setup, f.rel, &Statement{RevealCols: []int{sizesDefault.C()}}, c, tr)
 	require.ErrorIs(t, err, ErrInvalidStatement)
+}
+
+// TestPhiLabelIsBound pins that PhiLabel stands for Phi in the transcript: a proof
+// made under one label does not verify under another, even for the same function.
+func TestPhiLabelIsBound(t *testing.T) {
+	f := newFixture(t, sizesDefault, SetupOptions{}, true)
+	coms, proof := f.prove(t)
+	_, err := f.verify(coms, proof)
+	require.NoError(t, err)
+
+	f.rel.PhiLabel = []byte("pivot-test/phi/v2")
+	_, err = f.verify(coms, proof)
+	require.Error(t, err)
 }

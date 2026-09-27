@@ -45,7 +45,7 @@ func phiClaim(t *testing.T, curve *mathlib.Curve, numVars int) *MultiClaim {
 
 	return &MultiClaim{
 		Polys: polys,
-		Terms: []Term{
+		Phi: Terms{
 			{Coeff: frInt(3), Factors: []int{0, 1}},
 			{Coeff: frInt(-1), Factors: []int{2, 2, 0}},
 			{Coeff: frInt(5), Factors: []int{1}},
@@ -105,7 +105,7 @@ func TestMultiRoundTrip(t *testing.T) {
 
 		// The verifier's Product is Phi at the pool values: this is how a caller
 		// closes the argument.
-		phi, err := EvaluateTerms(claim.Terms, evals)
+		phi, err := EvaluateTerms(claim.Phi.(Terms), evals)
 		require.NoError(t, err)
 		product := fromZr(vOpen.Product)
 		assert.True(t, product.Equal(&phi))
@@ -130,7 +130,7 @@ func TestMultiSingleTermMatchesClaim(t *testing.T) {
 	require.NoError(t, err)
 	multi, mOpen, err := ProveMultiWithTranscript(curve, &MultiClaim{
 		Polys: []FieldPoly{f, g},
-		Terms: []Term{{Coeff: fr.One(), Factors: []int{0, 1}}},
+		Phi:   Terms{{Coeff: fr.One(), Factors: []int{0, 1}}},
 	}, newTr())
 	require.NoError(t, err)
 
@@ -191,13 +191,15 @@ func TestMultiValidation(t *testing.T) {
 		err   error
 	}{
 		"no terms":                {&MultiClaim{Polys: []FieldPoly{f}}, ErrNoFactors},
-		"no polys":                {&MultiClaim{Terms: []Term{{Coeff: fr.One(), Factors: []int{0}}}}, ErrNoFactors},
-		"empty term":              {&MultiClaim{Polys: []FieldPoly{f}, Terms: []Term{{Coeff: fr.One()}}}, ErrNoFactors},
-		"index out of range":      {&MultiClaim{Polys: []FieldPoly{f}, Terms: []Term{{Coeff: fr.One(), Factors: []int{1}}}}, ErrFactorIndex},
-		"negative index":          {&MultiClaim{Polys: []FieldPoly{f}, Terms: []Term{{Coeff: fr.One(), Factors: []int{-1}}}}, ErrFactorIndex},
-		"variable mismatch":       {&MultiClaim{Polys: []FieldPoly{f, g}, Terms: []Term{{Coeff: fr.One(), Factors: []int{0, 1}}}}, ErrNumVarsMismatch},
-		"not a power of two":      {&MultiClaim{Polys: []FieldPoly{f[:3]}, Terms: []Term{{Coeff: fr.One(), Factors: []int{0}}}}, ErrNotPowerOfTwo},
-		"single-point polynomial": {&MultiClaim{Polys: []FieldPoly{f[:1]}, Terms: []Term{{Coeff: fr.One(), Factors: []int{0}}}}, ErrNumVarsMismatch},
+		"no polys":                {&MultiClaim{Phi: Terms{{Coeff: fr.One(), Factors: []int{0}}}}, ErrNoFactors},
+		"empty term":              {&MultiClaim{Polys: []FieldPoly{f}, Phi: Terms{{Coeff: fr.One()}}}, ErrNoFactors},
+		"index out of range":      {&MultiClaim{Polys: []FieldPoly{f}, Phi: Terms{{Coeff: fr.One(), Factors: []int{1}}}}, ErrFactorIndex},
+		"negative index":          {&MultiClaim{Polys: []FieldPoly{f}, Phi: Terms{{Coeff: fr.One(), Factors: []int{-1}}}}, ErrFactorIndex},
+		"variable mismatch":       {&MultiClaim{Polys: []FieldPoly{f, g}, Phi: Terms{{Coeff: fr.One(), Factors: []int{0, 1}}}}, ErrNumVarsMismatch},
+		"not a power of two":      {&MultiClaim{Polys: []FieldPoly{f[:3]}, Phi: Terms{{Coeff: fr.One(), Factors: []int{0}}}}, ErrNotPowerOfTwo},
+		"single-point polynomial": {&MultiClaim{Polys: []FieldPoly{f[:1]}, Phi: Terms{{Coeff: fr.One(), Factors: []int{0}}}}, ErrNumVarsMismatch},
+		"func of degree 0":        {&MultiClaim{Polys: []FieldPoly{f}, Phi: Func{Deg: 0, F: func(v []fr.Element) fr.Element { return v[0] }}}, ErrNoFactors},
+		"nil func":                {&MultiClaim{Polys: []FieldPoly{f}, Phi: Func{Deg: 1}}, ErrNoFactors},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -208,4 +210,77 @@ func TestMultiValidation(t *testing.T) {
 
 	_, err := EvaluateTerms([]Term{{Coeff: fr.One(), Factors: []int{2}}}, []fr.Element{fr.One()})
 	require.ErrorIs(t, err, ErrFactorIndex)
+}
+
+// phiFunc is phiClaim's Phi, 3 h0 h1 - h2^2 h0 + 5 h1, written as a function.
+func phiFunc() Func {
+	return Func{Deg: 3, F: func(v []fr.Element) fr.Element {
+		var a, b, out fr.Element
+		three, five := frInt(3), frInt(5)
+		a.Mul(&v[0], &v[1]).Mul(&a, &three)
+		b.Square(&v[2]).Mul(&b, &v[0])
+		out.Sub(&a, &b)
+		b.Mul(&v[1], &five)
+		out.Add(&out, &b)
+
+		return out
+	}}
+}
+
+// A Func and the Terms of the same polynomial must yield the same proof: the
+// prover only ever evaluates Phi at points, so how Phi is written is invisible.
+func TestMultiFuncMatchesTerms(t *testing.T) {
+	curve, _ := testCurve(t)
+	for numVars := 1; numVars <= 5; numVars++ {
+		terms := phiClaim(t, curve, numVars)
+		fn := &MultiClaim{Polys: terms.Polys, Phi: phiFunc()}
+
+		pt, _, err := ProveMulti(curve, terms)
+		require.NoError(t, err)
+		pf, fOpen, err := ProveMulti(curve, fn)
+		require.NoError(t, err)
+		require.Equal(t, pt.FieldSum.Bytes(), pf.FieldSum.Bytes())
+		require.Len(t, pf.FieldRounds, len(pt.FieldRounds))
+		for r := range pt.FieldRounds {
+			for i := range pt.FieldRounds[r] {
+				require.Equal(t, pt.FieldRounds[r][i].Bytes(), pf.FieldRounds[r][i].Bytes(), "round %d eval %d", r, i)
+			}
+		}
+
+		vOpen, err := VerifyMulti(curve, fn.Shape(), pf)
+		require.NoError(t, err)
+		evals := make([]fr.Element, len(fOpen.FieldEvals))
+		for i := range evals {
+			evals[i] = fromZr(fOpen.FieldEvals[i])
+		}
+		want, err := fn.Evaluate(evals)
+		require.NoError(t, err)
+		got := fromZr(vOpen.Product)
+		require.True(t, got.Equal(&want), "numVars=%d", numVars)
+	}
+}
+
+// An understated degree breaks completeness: the honest round polynomials do not
+// fit, so the proof fails a round check or the closing comparison.
+func TestMultiFuncUnderstatedDegreeFails(t *testing.T) {
+	curve, _ := testCurve(t)
+	claim := phiClaim(t, curve, 4)
+	under := phiFunc()
+	under.Deg = 2
+	fn := &MultiClaim{Polys: claim.Polys, Phi: under}
+
+	proof, open, err := ProveMulti(curve, fn)
+	require.NoError(t, err)
+	vOpen, err := VerifyMulti(curve, fn.Shape(), proof)
+	if err != nil {
+		return
+	}
+	evals := make([]fr.Element, len(open.FieldEvals))
+	for i := range evals {
+		evals[i] = fromZr(open.FieldEvals[i])
+	}
+	want, err := fn.Evaluate(evals)
+	require.NoError(t, err)
+	got := fromZr(vOpen.Product)
+	require.False(t, got.Equal(&want), "a degree-3 Phi declared as degree 2 must not verify")
 }

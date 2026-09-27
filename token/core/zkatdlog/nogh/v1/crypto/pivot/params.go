@@ -134,24 +134,29 @@ type AffineForm struct {
 	Const  fr.Element
 }
 
-// Monomial is Coeff * prod_{k in Vars} Z_k, where Z_k is the value of the k-th
-// affine form. A repeated index raises that form to a power; empty Vars is a
-// constant.
-type Monomial struct {
-	Coeff fr.Element
-	Vars  []int
-}
-
 // Relation is the public part of the pivot relation:
 //
 //	G0 + sum_s (Alpha_s + (B w)_s) g_s + sum_t (AlphaPub_t + (BPub w)_t) x_t
 //	   + sum_i (Gamma w)_i G_i                                          = 0_G
-//	sum_m Phi[m].Coeff * prod_{k in Phi[m].Vars} Forms[k](w)          = 0_F
+//	Phi(Forms[0](w), ..., Forms[len(Forms)-1](w))                     = 0_F
 //
 // g is the private group witness and x the instance's row of the statement's public
 // table. B is c x n, BPub is cp x n and Gamma is l x n, all given by their non-zero
 // entries. AlphaPub and BPub must be empty when the statement has no public table.
-// An empty Phi means there is no field constraint, and SC3 is skipped.
+//
+// Phi is given as a function of the form values, so it can be written directly,
+// e.g. z[0]*(1-z[1]) + z[2]. It receives one value per form and must not modify or
+// retain the slice. The prover evaluates it point by point and the verifier once,
+// so it is never expanded into monomials. Two fields go with it:
+//
+//   - PhiDegree is an upper bound on its total degree, which sizes the SC3 round
+//     polynomials. An understated degree makes honest proofs fail; it does not
+//     weaken soundness.
+//   - PhiLabel names Phi in the transcript, since a function cannot be absorbed.
+//     It must identify Phi's shape and any parameter of it not already bound by
+//     the transcript.
+//
+// A nil Phi means there is no field constraint, and SC3 is skipped.
 type Relation struct {
 	Alpha    []fr.Element
 	B        []SparseEntry
@@ -161,7 +166,10 @@ type Relation struct {
 	G        []bls12381.G1Affine
 	G0       bls12381.G1Affine
 	Forms    []AffineForm
-	Phi      []Monomial
+
+	Phi       func(z []fr.Element) fr.Element
+	PhiDegree int
+	PhiLabel  []byte
 }
 
 // validate checks that every index is in range for the sizes and for a public table
@@ -201,31 +209,27 @@ func (r *Relation) validate(s Sizes, cp int) error {
 			}
 		}
 	}
-	for m, mono := range r.Phi {
-		for _, v := range mono.Vars {
-			if v < 0 || v >= len(r.Forms) {
-				return errors.Wrapf(ErrInvalidRelation, "monomial %d refers to form %d, have %d", m, v, len(r.Forms))
-			}
+	if r.Phi == nil {
+		if r.PhiDegree != 0 || len(r.PhiLabel) != 0 {
+			return errors.Wrap(ErrInvalidRelation, "PhiDegree and PhiLabel are set but Phi is nil")
+		}
+	} else {
+		if r.PhiDegree < 1 {
+			return errors.Wrapf(ErrInvalidRelation, "PhiDegree must be at least 1, got %d", r.PhiDegree)
+		}
+		if len(r.PhiLabel) == 0 {
+			return errors.Wrap(ErrInvalidRelation, "PhiLabel is required with Phi, to bind it into the transcript")
+		}
+		if len(r.Forms) == 0 {
+			return errors.Wrap(ErrInvalidRelation, "Phi is set but there are no forms")
 		}
 	}
 
 	return nil
 }
 
-// phiDegree returns the total degree of Phi.
-func (r *Relation) phiDegree() int {
-	d := 0
-	for _, m := range r.Phi {
-		if len(m.Vars) > d {
-			d = len(m.Vars)
-		}
-	}
-
-	return d
-}
-
 // hasFieldConstraint reports whether SC3 runs.
-func (r *Relation) hasFieldConstraint() bool { return len(r.Phi) > 0 }
+func (r *Relation) hasFieldConstraint() bool { return r.Phi != nil }
 
 // Statement is the per-aggregate public input.
 //

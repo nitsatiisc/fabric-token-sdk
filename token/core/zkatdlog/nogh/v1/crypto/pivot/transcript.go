@@ -130,7 +130,7 @@ func absorbSetupAndCommitments(tr *csp.Transcript, s Sizes, coms Commitments) er
 
 // absorbRelation binds the public relation. A relation derived from challenges is
 // already determined by the transcript, but absorbing it anyway makes the protocol
-// safe for relations that are not.
+// safe for relations that are not. Phi is bound through PhiDegree and PhiLabel.
 func absorbRelation(tr *csp.Transcript, r *Relation) {
 	absorbFrs(tr, r.Alpha)
 	absorbSparse(tr, r.B)
@@ -148,14 +148,10 @@ func absorbRelation(tr *csp.Transcript, r *Relation) {
 		}
 		absorbFr(tr, &f.Const)
 	}
-	absorbInt(tr, len(r.Phi))
-	for _, m := range r.Phi {
-		absorbFr(tr, &m.Coeff)
-		absorbInt(tr, len(m.Vars))
-		for _, v := range m.Vars {
-			absorbInt(tr, v)
-		}
-	}
+	// Phi is a function and cannot be absorbed; its degree and label stand for it.
+	absorbInt(tr, r.PhiDegree)
+	absorbInt(tr, len(r.PhiLabel))
+	tr.Absorb(r.PhiLabel)
 }
 
 // absorbSparse absorbs a length-prefixed list of sparse entries.

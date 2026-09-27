@@ -36,7 +36,7 @@ func ExampleProveMulti() {
 
 	claim := &sumcheck.MultiClaim{
 		Polys: []sumcheck.FieldPoly{table(1, 2, 3, 4), table(5, 6, 7, 8)},
-		Terms: []sumcheck.Term{
+		Phi: sumcheck.Terms{
 			{Coeff: two, Factors: []int{0, 1}},      // 2 h0 h1
 			{Coeff: minusOne, Factors: []int{1, 1}}, // - h1^2
 		},
@@ -62,7 +62,7 @@ func ExampleProveMulti() {
 			panic(err)
 		}
 	}
-	phi, err := sumcheck.EvaluateTerms(claim.Terms, evals)
+	phi, err := claim.Evaluate(evals)
 	if err != nil {
 		panic(err)
 	}

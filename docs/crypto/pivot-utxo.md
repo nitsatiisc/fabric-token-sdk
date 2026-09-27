@@ -38,7 +38,16 @@ IdemixNym owners (identity type 3).
 
 The range identity is evaluated at a challenge $`\eta`$, using the Lagrange coefficients of
 $`a_j`$ and $`b_j`$. The 16 group equations and 4 field equations of a transfer are then
-combined with powers of $`\xi`$ into the single mixed equation of the pivot relation. The
+combined with powers of $`\xi`$ into the single mixed equation of the pivot relation.
+The field part is the degree-2 function
+
+```math
+\Phi(Z) = Z_0 + \xi Z_1 + \xi^2 \bigl(Z_2 + Z_4 (1 - Z_4)\bigr) + \xi^3 \bigl(Z_3 + Z_5 (1 - Z_5)\bigr)
+```
+
+of six affine forms: the two value decompositions, and $`b_j(\eta)`$ and $`a_j(\eta)`$
+for each output. Its label is `PivotUTXO/range-and-sum/v1/kappa=`$`\kappa`$; $`\xi`$ and
+$`\eta`$ are transcript challenges, so they need no label. The
 pivot parameters $`\alpha`$, $`B`$, $`\Gamma`$, $`G_0`$ and $`\Phi`$ are **generated** from a list of the
 equations (`relation.go`), not written out, so the parameters and the equations
 cannot drift apart. `TestEquationsHoldOnHonestInstance` checks every equation

@@ -56,9 +56,16 @@ elements that differ per instance but are known to the verifier.
 | $`\Gamma \in \mathbb{F}^{l \times n}`$ (sparse) | pairs the public generators $`G`$ with linear combinations of $`w`$ |
 | $`G \in \mathbb{G}^l`$, $`G_0 \in \mathbb{G}`$ | public generators and a public constant offset |
 | `Forms` | affine forms $`L_k(w) = \sum \mathit{coeff} \cdot w[\mathit{col}] + \mathit{const}`$ |
-| $`\Phi`$ | a polynomial in the form values, as a list of monomials |
+| $`\Phi`$, `PhiDegree`, `PhiLabel` | the field constraint as a function of the form values, an upper bound on its degree, and a label that binds it into the transcript |
 
-An empty $`\Phi`$ means there is no field constraint. All dimensions are powers of two
+A nil $`\Phi`$ means there is no field constraint.
+
+$`\Phi`$ is a Go function, so it can be written directly — $`Z_0 (1 - Z_1) + Z_2`$ is one
+line — and it is never expanded into monomials. Because a function cannot be
+absorbed into the transcript, `PhiLabel` stands for it there and must identify its
+shape and any parameter of it not already bound by the transcript. `PhiDegree` sizes
+the SC3 round polynomials; an understated degree makes honest proofs fail but does
+not weaken soundness. All dimensions are powers of two
 (`Sizes` holds their logs); callers pad.
 
 ## 3. Witness Layout
@@ -100,8 +107,8 @@ After the commitments, and after $`\tau \leftarrow \mathbb{F}^{\log K}`$:
   $`S = \alpha + B W`$ is formed by the prover. SC2's generators are public, so the
   verifier evaluates $`\tilde G(\rho_l)`$ itself.
 - **SC3** is the zero-check of the $`K`$ field constraints. Its pool is
-  $`[\mathrm{eq}(\cdot,\tau), \tilde L_1, \ldots, \tilde L_{\tau}]`$, and each monomial of $`\Phi`$ becomes a term with the $`\mathrm{eq}`$
-  factor prepended. It is skipped when $`\Phi`$ is empty.
+  $`[\mathrm{eq}(\cdot,\tau), \tilde L_1, \ldots, \tilde L_{\tau}]`$, and its composition is $`\mathrm{eq} \cdot \Phi(\tilde L_1, \ldots)`$, a
+  `sumcheck.Func` of degree `PhiDegree + 1`. It is skipped when $`\Phi`$ is nil.
 - **SC4** discharges every sparse product in one sum-check over $`x`$. Term $`j`$, weighted
   $`\theta^j`$, is $`S_j(x) \cdot \tilde W(x, z_j)`$:
 
@@ -204,7 +211,7 @@ protocol, in this order:
 
 1. The sizes and both commitments (shape plus the coset-oracle root).
 2. Anything the caller squeezes.
-3. The relation and the statement.
+3. The relation and the statement. $`\Phi`$ enters as `PhiDegree` and `PhiLabel`.
 4. $`\tau`$.
 5. SC1, then $`v_P`$ and `g~(rho_c, rho_K)`.
 6. SC1′ (with a public table), then $`v_P'`$.
@@ -265,6 +272,9 @@ that its group equation holds.
   swapped for another witness's.
 - **Structure**: missing sub-proofs and wrongly sized vectors return
   `ErrMalformedProof`.
+- **Phi**: a relation with $`\Phi`$ but no degree or label, or a degree and label
+  without $`\Phi`$, returns `ErrInvalidRelation`. A proof made under one `PhiLabel`
+  does not verify under another (`TestPhiLabelIsBound`).
 
 ## 11. References
 
