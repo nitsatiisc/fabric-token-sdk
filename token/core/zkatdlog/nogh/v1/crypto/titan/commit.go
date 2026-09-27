@@ -404,12 +404,9 @@ func CommitFieldWithFold(f sumcheck.FieldPoly, gens []bls12381.G1Affine, dom *Do
 
 // CommitFieldWithFoldAt is CommitFieldWithFold over a caller-chosen matrix split.
 //
-// The split must pass ValidateForFold, which is stricter than what committing alone
-// needs: the fold attaches to the row half and requires an even number of variables
-// there. A split that is legal to commit but not to fold is rejected here rather than
-// producing a commitment whose openings cannot be closed.
+// Any legal split can carry a fold; cfg is checked against the row half.
 func CommitFieldWithFoldAt(f sumcheck.FieldPoly, gens []bls12381.G1Affine, dom *Domain, k int, cfg FoldConfig, split Split) (*Commitment, *FieldOpeningHint, error) {
-	if err := split.ValidateForFold(); err != nil {
+	if err := split.Validate(); err != nil {
 		return nil, nil, err
 	}
 

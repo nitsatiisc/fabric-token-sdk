@@ -33,35 +33,24 @@ func TestSplitShapeMultipliesBack(t *testing.T) {
 	}
 }
 
-// TestSplitValidateIsWeakerThanValidateForFold pins the separation between the two
-// checks, which is the part of this type most likely to be "simplified" into one.
-//
-// Committing a field polynomial needs only that the halves multiply back. Folding
-// additionally needs an EVEN row half, because the coset layout halves it exactly.
-// These are different contracts and they belong to different phases: commitFieldAt
-// calls Validate, CommitFieldWithFoldAt calls ValidateForFold.
-//
-// Collapsing them is not hypothetical. An earlier draft of this type put the
-// even-row-half rule in Validate, and it broke every odd-m and m=2 test in the
-// package at once -- because those sizes commit and open perfectly well through the
-// non-folding stages, which is exactly what those tests check.
-func TestSplitValidateIsWeakerThanValidateForFold(t *testing.T) {
+// TestSplitValidateAcceptsEveryRowHalf pins that Validate is the whole contract of a
+// split, including for folding: a row half of either parity is legal. An earlier
+// version had a separate ValidateForFold demanding an EVEN row half; it was not
+// needed for correctness and was removed. TestFieldPCSOddNumVarsWithACustomConfig is
+// the end-to-end evidence that odd row halves prove, verify and reject forgeries.
+func TestSplitValidateAcceptsEveryRowHalf(t *testing.T) {
 	t.Parallel()
 
-	// Legal to commit, illegal to fold: the row half is odd.
 	for _, s := range []Split{
 		{M: 2, M1: 1},  // rowVars 1
 		{M: 6, M1: 3},  // rowVars 3 -- the balanced split of m=6
 		{M: 10, M1: 5}, // rowVars 5 -- the balanced split of m=10
 		{M: 9, M1: 4},  // rowVars 5
 	} {
-		require.NoError(t, s.Validate(),
-			"M=%d M1=%d must be committable: the halves multiply back", s.M, s.M1)
-		require.ErrorIs(t, s.ValidateForFold(), ErrInvalidMatrixSplit,
-			"M=%d M1=%d has an odd row half (%d) and must not be foldable", s.M, s.M1, s.RowVars())
+		require.NoError(t, s.Validate(), "M=%d M1=%d has an odd row half (%d), which is legal", s.M, s.M1, s.RowVars())
 	}
 
-	// Legal for both.
+	// Even row halves, as before.
 	for _, s := range []Split{
 		{M: 4, M1: 2},
 		{M: 8, M1: 4},
@@ -70,7 +59,7 @@ func TestSplitValidateIsWeakerThanValidateForFold(t *testing.T) {
 		{M: 18, M1: 8}, // the Rust reference's own value for m=18
 	} {
 		require.NoError(t, s.Validate(), "M=%d M1=%d", s.M, s.M1)
-		require.NoError(t, s.ValidateForFold(), "M=%d M1=%d", s.M, s.M1)
+		require.NoError(t, s.Validate(), "M=%d M1=%d", s.M, s.M1)
 	}
 }
 
@@ -98,10 +87,13 @@ func TestSplitValidateRejectsDegenerate(t *testing.T) {
 
 	// M=1, M1=0 is the one degenerate shape that IS accepted, because matrixShape(1)
 	// produced it before the split became a parameter and rejecting it now would be a
-	// behaviour change rather than a threading change. Nothing can fold it.
+	// behaviour change rather than a threading change. Nothing can fold it: a single
+	// row variable leaves no room for even one folding round, which the fold
+	// configuration rejects.
 	deg := Split{M: 1, M1: 0}
 	require.NoError(t, deg.Validate(), "the legacy 2x1 shape must stay committable")
-	require.Error(t, deg.ValidateForFold(), "but it must never be foldable")
+	_, err := NewFieldSetupWithSplit(deg, testGenerators(t, deg.Cols()), testCurve(), FoldConfig{})
+	require.ErrorIs(t, err, ErrInvalidFoldConfig, "but it must never be foldable")
 }
 
 // TestDefaultMatrixSplitIsTheBalancedCut pins the default, which is a compatibility
@@ -124,27 +116,10 @@ func TestDefaultMatrixSplitIsTheBalancedCut(t *testing.T) {
 		require.Equal(t, cols, s.Cols(), "m=%d: matrixShape and the default split must agree on columns", m)
 	}
 
-	// When is the balanced cut foldable? The rule is that RowVars = m - m/2 is even,
-	// and it is worth writing out because the familiar "m must be a multiple of 4" is
-	// only half of it:
-	//
-	//	m  % 4 == 0  ->  rowVars = m/2, even            foldable  (4, 8, 12, ...)
-	//	m  % 4 == 3  ->  rowVars = (m+1)/2, even        foldable  (3, 7, 11, ...)
-	//	m  % 4 == 1  ->  rowVars = (m+1)/2, odd         not foldable
-	//	m  % 4 == 2  ->  rowVars = m/2, odd             not foldable
-	//
-	// So the odd sizes m = 3, 7, 11, ... were never blocked by the SPLIT; the field
-	// path rejected them only because of the separate drawability floor (the default
-	// 43 queries must come from 2^(rowVars-Ell+LogRate) cosets, which needs rowVars
-	// >= 4). Conflating the two is easy: an earlier version of this very assertion
-	// claimed "foldable iff m %% 4 == 0" and failed at m = 3.
-	for m := 1; m <= 24; m++ {
-		foldable := DefaultMatrixSplit(m).ValidateForFold() == nil
-		require.Equal(t, (m-m/2)%2 == 0, foldable,
-			"m=%d: the balanced split is foldable iff its row half (%d) is even",
-			m, m-m/2)
-		require.Equal(t, m%4 == 0 || m%4 == 3, foldable,
-			"m=%d: equivalently, iff m %% 4 is 0 or 3", m)
+	// Which balanced cuts the CANONICAL setup serves is NewFieldSetup's business
+	// (numVars divisible by 4); as a split, every one of them is legal.
+	for m := 2; m <= 24; m++ {
+		require.NoError(t, DefaultMatrixSplit(m).Validate(), "m=%d", m)
 	}
 }
 

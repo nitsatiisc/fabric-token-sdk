@@ -163,9 +163,17 @@ func TestFoldConfigValidate(t *testing.T) {
 	good := FoldConfig{Ell: 3, LogRate: 3, Queries: 43, Regime: Capacity}
 	require.NoError(t, good.Validate(12))
 
-	t.Run("m must be even", func(t *testing.T) {
+	t.Run("m may be odd", func(t *testing.T) {
 		t.Parallel()
-		require.ErrorIs(t, good.Validate(11), ErrInvalidFoldConfig)
+		require.NoError(t, good.Validate(11))
+		// ell is bounded by m, not by m/2: a custom configuration may put more
+		// variables on the coset than on the reduced polynomial.
+		above := good
+		above.Ell = 6
+		require.NoError(t, above.Validate(11))
+		over := good
+		over.Ell = 12
+		require.ErrorIs(t, over.Validate(11), ErrInvalidFoldConfig)
 	})
 	t.Run("m must be positive", func(t *testing.T) {
 		t.Parallel()
@@ -178,16 +186,22 @@ func TestFoldConfigValidate(t *testing.T) {
 		lo.Ell = 1
 		require.NoError(t, lo.Validate(12))
 
-		hi := good
-		hi.Ell = 6 // m/2
-		require.NoError(t, hi.Validate(12))
+		half := good
+		half.Ell = 6 // m/2, where the canonical choice stops
+		require.NoError(t, half.Validate(12))
+
+		// Above m/2 is correct; the only limit is that the queries stay drawable,
+		// which at Ell = 9 leaves 2^(12-9+3) = 64 cosets for 43 queries.
+		above := good
+		above.Ell = 9
+		require.NoError(t, above.Validate(12))
 
 		tooLow := good
 		tooLow.Ell = 0
 		require.ErrorIs(t, tooLow.Validate(12), ErrInvalidFoldConfig)
 
 		tooHigh := good
-		tooHigh.Ell = 7 // m/2 + 1
+		tooHigh.Ell = 13 // m + 1
 		require.ErrorIs(t, tooHigh.Validate(12), ErrInvalidFoldConfig)
 	})
 	t.Run("rate and queries must be positive", func(t *testing.T) {

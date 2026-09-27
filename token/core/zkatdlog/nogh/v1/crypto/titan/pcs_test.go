@@ -412,38 +412,36 @@ func TestPCSRejectsWrongArity(t *testing.T) {
 	})
 }
 
-// TestFieldPCSRejectsUnsupportedNumVars pins the field path's size constraints at the
-// API boundary, where they are cheap to explain, rather than letting them surface as
-// a fold-configuration error several calls deeper -- or, worse, as a transcript
-// failure from inside proveFold after the commitment has already been built.
+// TestFieldPCSRejectsUnsupportedNumVars pins the CANONICAL field setup's size
+// constraints at the API boundary, and that they are the canonical choice's rather
+// than the scheme's.
 //
-// Both are real constraints, not oversights, they are independent, and they are
-// reported by DIFFERENT checks -- which is why this test asserts a distinct sentinel
-// for each rather than one for both:
+// Two different reasons, asserted separately so neither can pass for the other:
 //
-//   - m=6, 10: rowVars = m - m/2 is odd under the balanced split, and the fold needs
-//     an even count. That is a property of the SPLIT, so it fails
-//     Split.ValidateForFold with ErrInvalidMatrixSplit.
-//   - m=4: the split is fine (rowVars=2, even), but that folded domain holds only 16
-//     cosets and cannot supply the default 43 distinct queries. That is a property of
-//     the CONFIGURATION, so it fails FoldConfig.Validate with ErrInvalidFoldConfig.
+//   - m=6, 10: not divisible by 4, so the balanced split does not give two equal
+//     even halves. The canonical setup is defined for those sizes only.
+//   - m=4: divisible by 4, but its 2-variable row half has too few cosets to draw
+//     the default 43 queries from.
 //
-// Asserting the right sentinel per case is what keeps this test honest. An earlier
-// version asserted ErrInvalidFoldConfig for all three; it passed only because the
-// even-rowVars rule was checked inside the fold config, and it would have gone on
-// passing if one of the two constraints had silently stopped being enforced.
-//
-// Note that both restrictions come from the BALANCED split this constructor uses,
-// not from the scheme -- see TestFieldPCSSplitMakesOddSizesUsable.
+// Both are properties of the canonical configuration: with a custom FoldConfig,
+// m=10 is served by the same balanced split (see also
+// TestFieldPCSOddNumVarsWithACustomConfig).
 func TestFieldPCSRejectsUnsupportedNumVars(t *testing.T) {
 	t.Parallel()
 
-	// Odd row half: rejected as a split.
 	for _, m := range []int{6, 10} {
 		_, numCols := matrixShape(m)
 		_, err := NewFieldSetup(m, testGenerators(t, numCols), testCurve(), FoldConfig{})
-		require.ErrorIs(t, err, ErrInvalidMatrixSplit,
-			"m=%d has an odd row half under the balanced split and must be rejected at setup", m)
+		require.ErrorIs(t, err, ErrInvalidFoldConfig, "m=%d is not a canonical size", m)
+		require.Contains(t, err.Error(), "divisible by 4", "m=%d was rejected, but not as a non-canonical size", m)
+	}
+
+	// The same size with a custom configuration: served.
+	{
+		const m = 10
+		_, numCols := matrixShape(m)
+		_, err := NewFieldSetup(m, testGenerators(t, numCols), testCurve(), customFold(t, DefaultMatrixSplit(m).RowVars()))
+		require.NoError(t, err, "m=%d must work with a custom configuration", m)
 	}
 
 	// Even row half, but too few cosets to draw the default queries from: rejected as
@@ -613,14 +611,15 @@ func TestPCSSetupSizesTheDomainByTheFoldedHalf(t *testing.T) {
 	}
 }
 
-// TestFieldPCSSplitMakesOddSizesUsable is the point of making the matrix split a
-// parameter: sizes the balanced split cannot serve become usable by moving the cut.
+// TestFieldPCSSplitMakesOddSizesUsable pins that a caller-chosen split works end to
+// end, with the split recorded on the wire.
 //
-// The balanced split forces rowVars = m - m/2 to be even, i.e. m divisible by 4,
-// because the fold halves the row half exactly. That is a property of the *choice*
-// m1 = m/2, not of the scheme. With the cut free, the condition becomes "M - M1 is
-// even", which is satisfiable at every m > 2 -- so m = 10, 14 and 18, all rejected
-// outright by NewFieldSetup, prove and verify here.
+// It was written when the balanced split could not serve m = 10, 14 or 18, because
+// the fold was believed to need an even row half; moving the cut was the only way to
+// use those sizes. That belief was wrong -- the balanced split now serves them too,
+// see TestFieldPCSOddNumVarsWithTheDefaultSplit -- but choosing the cut remains a
+// feature, so the test stays as the check that a non-default split proves the right
+// polynomial.
 //
 // # Why this asserts sigma against an independent evaluator
 //
@@ -648,12 +647,8 @@ func TestFieldPCSSplitMakesOddSizesUsable(t *testing.T) {
 			t.Parallel()
 
 			split := Split{M: c.m, M1: c.m1}
-			require.NoError(t, split.ValidateForFold(),
+			require.NoError(t, split.Validate(),
 				"m=%d M1=%d should be a legal split", c.m, c.m1)
-
-			// The premise: the balanced constructor cannot serve this size at all.
-			_, err := NewFieldSetup(c.m, testGenerators(t, 1<<(c.m/2)), testCurve(), FoldConfig{})
-			require.Error(t, err, "m=%d must be unusable under the balanced split, or this test proves nothing", c.m)
 
 			setup, err := NewFieldSetupWithSplit(split, testGenerators(t, split.Cols()), testCurve(), FoldConfig{})
 			require.NoError(t, err)

@@ -777,37 +777,40 @@ func TestEvalWithoutCosetsRejectsAFoldProof(t *testing.T) {
 	require.ErrorIs(t, err, ErrNilProof)
 }
 
-// TestFieldFoldRequiresMDivisibleByFour pins the two constraints the field path
-// inherits, and keeps them distinguishable -- they are independent, and a change that
-// fixed one would otherwise look like it had fixed both.
+// TestFieldFoldDefaultConfigBySize pins which field sizes fold at the default
+// configuration, and why the others do not -- two different reasons, kept
+// distinguishable so a change to one cannot pass for a change to the other.
 //
-// PARITY: the folding phase runs on the tier-1 group polynomial, which has
-// rowVars = m-m/2 variables, and FoldConfig requires an even count. m=6 gives
-// rowVars=3, so m must be divisible by 4.
+// CANONICAL: the folding phase runs on the tier-1 group polynomial, which has
+// rowVars = ceil(m/2) variables, and the canonical configuration is defined for an
+// even count. m=2, 6, 10 give odd row halves; they fold with a custom configuration.
 //
 // DRAWABILITY: the Q consistency queries are distinct indices into the folded domain,
-// which holds 2^(rowVars-Ell+LogRate) cosets. m=4 gives rowVars=2 and only 16 cosets,
-// which cannot supply the default 43 queries. This is why the field path's smallest
-// usable size is 8 rather than 4, and it is a property of the DEFAULT query count
-// rather than of the construction -- the subtest below shows m=4 working at Q=16.
-func TestFieldFoldRequiresMDivisibleByFour(t *testing.T) {
+// which holds 2^(rowVars-Ell+LogRate) cosets. m=4 and m=6 give rowVars 2 and 3 and at
+// most 32 cosets, which cannot supply the default 43 queries. This is a property of
+// the DEFAULT query count rather than of the construction -- the subtest below shows
+// m=4 working at Q=16.
+//
+// Neither is a property of the construction: an earlier version of this test (then
+// named TestFieldFoldRequiresMDivisibleByFour) presented the parity rule as one.
+func TestFieldFoldDefaultConfigBySize(t *testing.T) {
 	t.Parallel()
 
 	const (
-		ok          = "ok"
-		parity      = "odd row count"
-		drawability = "too few cosets for the default queries"
+		ok           = "ok"
+		notCanonical = "odd row half: outside the canonical configuration"
+		drawability  = "too few cosets for the default queries"
 	)
 
 	for _, tc := range []struct {
 		m      int
 		reason string
 	}{
-		{2, parity}, // rowVars=1
-		{4, drawability},
-		{6, parity}, // rowVars=3
+		{2, notCanonical}, // rowVars=1
+		{4, drawability},  // rowVars=2
+		{6, notCanonical}, // rowVars=3
 		{8, ok},
-		{10, parity}, // rowVars=5
+		{10, notCanonical}, // rowVars=5: folds with a custom configuration, see below
 		{12, ok},
 	} {
 		rowVars := tc.m - tc.m/2
@@ -825,9 +828,9 @@ func TestFieldFoldRequiresMDivisibleByFour(t *testing.T) {
 
 		// Naming the reason is the point: both paths return ErrInvalidFoldConfig, so
 		// asserting the sentinel alone would not notice the two swapping over.
-		if tc.reason == parity {
-			require.Contains(t, err.Error(), "even",
-				"m=%d was rejected, but not for the parity reason this table records", tc.m)
+		if tc.reason == notCanonical {
+			require.Contains(t, err.Error(), "canonical",
+				"m=%d was rejected, but not as a non-canonical size", tc.m)
 		} else {
 			require.Contains(t, err.Error(), "distinct queries",
 				"m=%d was rejected, but not for the drawability reason this table records", tc.m)
@@ -840,6 +843,11 @@ func TestFieldFoldRequiresMDivisibleByFour(t *testing.T) {
 	small := FoldConfig{Ell: 1, LogRate: 3, Queries: 16, Regime: Capacity}
 	require.NoError(t, small.Validate(2),
 		"m=4 (rowVars=2) should fold at a query count its 16 cosets can supply")
+
+	// Likewise an odd row half is outside the canonical configuration, not the
+	// construction: m=10's row half of 5 folds at the default rate and queries.
+	custom := FoldConfig{Ell: DefaultEll(5, 43), LogRate: 3, Queries: 43, Regime: Capacity}
+	require.NoError(t, custom.Validate(5), "m=10 (rowVars=5) should fold with a custom configuration")
 }
 
 // TestFoldChecksEveryQueryNotJustTheFirst pins that the verifier checks all Q

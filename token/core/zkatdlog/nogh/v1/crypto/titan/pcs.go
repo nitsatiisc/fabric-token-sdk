@@ -97,19 +97,24 @@ type FieldSetup struct {
 // curve is the mathlib curve used for the transcript and leg 2; pass nil for the
 // one matching this package's types.
 //
-// cfg is the folding configuration. Pass the zero FoldConfig to take
-// DefaultFoldConfig, which targets 128 bits under the capacity bound.
+// This constructor uses the BALANCED matrix split: floor(numVars/2) column
+// variables for leg 2 and ceil(numVars/2) row variables for leg 1, which the fold
+// attaches to. Use NewFieldSetupWithSplit to move the cut.
 //
-// This constructor uses the BALANCED matrix split, which is what makes numVars
-// divisible by 4 a requirement rather than merely even: folding attaches to leg 1,
-// which runs over rowVars = numVars - numVars/2, and that must itself be even.
-// numVars = 4, 8, 12 work here; 6 and 10 do not, and are rejected rather than
-// surfacing later as a confusing fold error.
+// cfg is the folding configuration of the row half, and chooses between two
+// contracts:
 //
-// That restriction is a property of the balanced split, not of the scheme. Use
-// NewFieldSetupWithSplit to choose the cut, which makes odd and
-// non-multiple-of-four sizes usable -- numVars = 10 at M1 = 4 has a row half of 6.
+//   - The zero FoldConfig takes the CANONICAL setup: the balanced split and
+//     DefaultFoldConfig on the row half. It is defined for numVars divisible by 4,
+//     where both halves are the same even size, and rejects anything else.
+//   - A non-zero cfg is a custom configuration and is checked for correctness
+//     only, by FoldConfig.Validate against the row half; any numVars it fits works.
 func NewFieldSetup(numVars int, gens []bls12381.G1Affine, curve *mathlib.Curve, cfg FoldConfig) (*FieldSetup, error) {
+	if cfg == (FoldConfig{}) && (numVars <= 0 || numVars%4 != 0) {
+		return nil, errors.Wrapf(ErrInvalidFoldConfig,
+			"the canonical field setup is defined for numVars divisible by 4, got %d; "+
+				"pass a custom FoldConfig, or use NewFieldSetupWithSplit, for other sizes", numVars)
+	}
 	return NewFieldSetupWithSplit(DefaultMatrixSplit(numVars), gens, curve, cfg)
 }
 
@@ -125,9 +130,10 @@ func NewFieldSetup(numVars int, gens []bls12381.G1Affine, curve *mathlib.Curve, 
 // other's, and the balanced choice is not optimal for every size -- the Rust
 // reference ships tuned, asymmetric values per m.
 //
-// The split must satisfy ValidateForFold: both halves non-empty, and an EVEN row
-// half, since the coset layout halves it exactly. Within that, smaller M1 makes leg
-// 2 cheaper and the domain larger; larger M1 the reverse.
+// Any legal split works: smaller M1 makes leg 2 cheaper and the domain larger;
+// larger M1 the reverse. A zero cfg takes DefaultFoldConfig on the row half, which
+// is defined for an even row half only; a custom cfg is checked for correctness
+// only, by FoldConfig.Validate.
 //
 // Choosing a split is a commitment format decision, not just a local one: it is
 // recorded in Commitment.ColVars and the verifier checks against it, so a prover and
@@ -135,7 +141,7 @@ func NewFieldSetup(numVars int, gens []bls12381.G1Affine, curve *mathlib.Curve, 
 // different polynomials.
 func NewFieldSetupWithSplit(split Split, gens []bls12381.G1Affine, curve *mathlib.Curve, cfg FoldConfig) (*FieldSetup, error) {
 	numVars := split.M
-	if err := split.ValidateForFold(); err != nil {
+	if err := split.Validate(); err != nil {
 		return nil, err
 	}
 	rowVars := split.RowVars()
@@ -369,9 +375,10 @@ type GroupSetup struct {
 // curve is the mathlib curve used for the transcript; pass nil for the one
 // matching this package's types.
 //
-// cfg is the folding configuration; pass the zero FoldConfig to take
-// DefaultFoldConfig. The group path has no matrix split, so it needs only numVars
-// even -- unlike the field path, which needs divisibility by 4.
+// cfg is the folding configuration. The zero FoldConfig takes the CANONICAL
+// DefaultFoldConfig, defined for even numVars only; a non-zero cfg is custom and is
+// checked for correctness only, by FoldConfig.Validate, so any numVars and any
+// coset dimension 1 <= Ell <= numVars it fits works.
 func NewGroupSetup(numVars int, curve *mathlib.Curve, cfg FoldConfig) (*GroupSetup, error) {
 	if cfg == (FoldConfig{}) {
 		var err error
@@ -539,9 +546,8 @@ func (v *GroupVerifier) VerifyErr(proof *GroupEvalProof, sigma *bls12381.G1Affin
 // runs over, which is what the folding phase and the evaluation domain are sized
 // by -- not the polynomial's own variable count.
 //
-// The matrix form splits m variables into m/2 columns and m - m/2 rows, and leg 1
-// is the row half. This is the source of the m divisible by 4 requirement: rowVars
-// must itself be even for the fold to attach.
+// The matrix form splits m variables into floor(m/2) columns and ceil(m/2) rows,
+// and leg 1 is the row half, over which the fold runs.
 func fieldRowVars(m int) int { return m - m/2 }
 
 // checkAlpha rejects an evaluation point of the wrong arity.

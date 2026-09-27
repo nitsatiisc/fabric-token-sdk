@@ -151,10 +151,21 @@ func DefaultEll(m, queries int) int {
 	return best
 }
 
-// DefaultFoldConfig returns the configuration this package recommends for an
-// m-variable polynomial: rho = 1/8, 128 bits under the capacity bound, and the
-// size-optimal number of folding rounds.
+// DefaultFoldConfig returns the CANONICAL configuration for an m-variable
+// polynomial: rho = 1/8, 128 bits under the capacity bound, and the size-optimal
+// number of folding rounds Ell <= m/2 (see DefaultEll).
+//
+// The canonical choice is deliberately strict: it is defined for even m only, the
+// shape the parameters were tuned for. It is not a correctness requirement -- any m
+// works with a custom FoldConfig, which Validate checks for correctness alone -- so
+// an odd m is rejected here with a pointer to that route rather than silently given
+// some other choice.
 func DefaultFoldConfig(m int) (FoldConfig, error) {
+	if m < 2 || m%2 != 0 {
+		return FoldConfig{}, errors.Wrapf(ErrInvalidFoldConfig,
+			"the canonical fold configuration is defined for even m >= 2, got %d; "+
+				"pass a custom FoldConfig for other sizes", m)
+	}
 	q, err := QueryCount(DefaultSecurityBits, DefaultLogRate, Capacity)
 	if err != nil {
 		return FoldConfig{}, err
@@ -172,25 +183,33 @@ func DefaultFoldConfig(m int) (FoldConfig, error) {
 	return cfg, nil
 }
 
-// Validate checks the configuration against an m-variable polynomial.
+// Validate checks that the configuration is CORRECT for an m-variable polynomial,
+// and nothing more. It is what a custom FoldConfig is held to.
 //
-// m must be even: the construction splits the variables in half and the coset
-// layout assumes an exact split. Ell must be in [1, m/2] — at least one round to
-// fold, and at most m/2 because Queries cosets of 2^Ell points are opened, so a
-// larger Ell would make the queries cost more than the polynomial it is proving.
+//   - m >= 1, and 1 <= Ell <= m: at least one folding round, and a coset
+//     dimension that fits the polynomial. The m - Ell remaining variables are the
+//     reduced polynomial, sent in plain; any split between the two is correct.
+//     Ell <= m/2 is a proof-size heuristic, not a correctness condition, so it is
+//     applied by DefaultEll and not here. m may be odd: the group sum-check splits
+//     at floor(m/2), a prover cost choice both sides derive identically, and the
+//     coset oracle needs nothing else.
+//   - LogRate >= 1 and Queries >= 1.
+//   - Queries <= NumCosets(m): the consistency queries are DISTINCT indices into
+//     the folded domain. This binds only at the smallest sizes -- the default 43
+//     queries need 2^(m-Ell+LogRate) >= 43 -- but it is checked here rather than
+//     left to sampleQueryIndices, which would report it from deep inside proveFold
+//     as a transcript failure long after the configuration could be changed.
+//   - A known soundness regime.
 //
-// Queries must also be drawable: the consistency queries are DISTINCT indices into
-// the folded domain, so Queries cannot exceed NumCosets(m). This binds only at the
-// very smallest sizes -- the default 43 queries need 2^(m-Ell+LogRate) >= 43, which
-// m = 2 fails and every larger even m satisfies -- but it is checked here rather
-// than left to sampleQueryIndices, which would report it from deep inside proveFold
-// as a transcript failure long after the configuration could be changed.
+// TestGroupPCSOddNumVars and TestCustomFoldConfigEllAboveHalf pin that the sizes
+// and splits this admits beyond the canonical ones are complete and reject
+// forgeries.
 func (c FoldConfig) Validate(m int) error {
-	if m <= 0 || m%2 != 0 {
-		return errors.Wrapf(ErrInvalidFoldConfig, "number of variables must be positive and even, got %d", m)
+	if m <= 0 {
+		return errors.Wrapf(ErrInvalidFoldConfig, "number of variables must be positive, got %d", m)
 	}
-	if c.Ell < 1 || c.Ell > m/2 {
-		return errors.Wrapf(ErrInvalidFoldConfig, "ell must be in [1, %d] for %d variables, got %d", m/2, m, c.Ell)
+	if c.Ell < 1 || c.Ell > m {
+		return errors.Wrapf(ErrInvalidFoldConfig, "ell must be in [1, %d] for %d variables, got %d", m, m, c.Ell)
 	}
 	if c.LogRate <= 0 {
 		return errors.Wrapf(ErrInvalidFoldConfig, "log of the inverse rate must be positive, got %d", c.LogRate)

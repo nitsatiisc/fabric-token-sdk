@@ -83,12 +83,10 @@ func (s Split) Cols() int { return 1 << s.M1 }
 // defined -- it produces 2^RowVars Pedersen commitments like any other shape -- and
 // this package did exactly that before the split became a parameter.
 //
-// The extra rule the fold needs, an EVEN row half, lives in ValidateForFold. Keeping
-// it out of here is not a relaxation for convenience: folding out of a commitment is
-// a property of the fold configuration attached later, and putting its constraint at
-// commit time would reject shapes that commit, open and verify correctly through the
-// non-folding stages. An earlier draft of this type did conflate them, and it broke
-// every odd-m and m=2 test in the package at once.
+// This is also all the fold needs from a split: any row half, odd or even, can carry
+// a fold, whose own constraints live in FoldConfig.Validate. An earlier version had a
+// separate ValidateForFold demanding an EVEN row half; that rule was not needed for
+// correctness and was removed (see docs/crypto/titan.md, section 13.10).
 //
 // M1 == 0 is allowed only at M == 1, the degenerate 2x1 matrix, because
 // matrixShape(1) produced it before and no configuration can fold it anyway.
@@ -102,30 +100,6 @@ func (s Split) Validate() error {
 	if s.M1 <= 0 || s.M1 >= s.M {
 		return errors.Wrapf(ErrInvalidMatrixSplit,
 			"column variables must be in [1, %d] for %d variables, got %d", s.M-1, s.M, s.M1)
-	}
-
-	return nil
-}
-
-// ValidateForFold checks Validate plus the condition the folding phase adds: the row
-// half must have an EVEN number of variables.
-//
-// The fold attaches to the row half, and the coset layout assumes an exact halving of
-// it. When the split was hardcoded to m/2 this surfaced as "m must be divisible by
-// 4", since RowVars = m - m/2 is even only then. With the split free it becomes a
-// condition on M1 rather than on M, which is what makes odd M usable: m = 9 at M1 = 3
-// has a row half of 6, where the hardcoded split would have given 5.
-//
-// Callers that attach a FoldConfig want this one. Callers that only commit want
-// Validate.
-func (s Split) ValidateForFold() error {
-	if err := s.Validate(); err != nil {
-		return err
-	}
-	if rv := s.RowVars(); rv%2 != 0 {
-		return errors.Wrapf(ErrInvalidMatrixSplit,
-			"row half must have an even number of variables for the fold to attach, "+
-				"but %d variables split at %d leaves %d", s.M, s.M1, rv)
 	}
 
 	return nil
