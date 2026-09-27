@@ -53,7 +53,7 @@ func TestProveGroupEvalRoundTrip(t *testing.T) {
 		require.NoError(t, err)
 		assert.True(t, sigma.Equal(&want), "m=%d: claimed sum is not f(alpha)", m)
 
-		vOpening, err := VerifyGroupEval(curve, proof, alpha, &sigma, ell)
+		vOpening, err := VerifyGroupEval(curve, proof, alpha, &sigma)
 		require.NoError(t, err, "m=%d", m)
 
 		require.Len(t, vOpening.R, m)
@@ -109,20 +109,28 @@ func TestSplitInvarianceProducesIdenticalProofs(t *testing.T) {
 		f := randomGroupPoly(t, m)
 		alpha := randomPoint(t, m)
 
-		// ell is bound into the transcript, so proofs for different ell draw
-		// different challenges and cannot be compared round by round. Compare the
-		// claimed sum, which is transcript-independent, and verify each proof
-		// under its own ell.
+		// ell is not bound into the transcript, so every ell draws the same
+		// challenges and must produce the same proof, round message by round
+		// message. Each proof must also verify, since the verifier does not know ell.
+		var proofs []*GroupSumCheckProof
 		var sums []bls12381.G1Affine
 		for ell := 0; ell <= m; ell++ {
 			proof, _, sigma, err := ProveGroupEval(curve, f, alpha, ell)
 			require.NoError(t, err, "m=%d ell=%d", m, ell)
-			_, err = VerifyGroupEval(curve, proof, alpha, &sigma, ell)
+			_, err = VerifyGroupEval(curve, proof, alpha, &sigma)
 			require.NoError(t, err, "m=%d ell=%d", m, ell)
+			proofs = append(proofs, proof)
 			sums = append(sums, sigma)
 		}
-		for i := range sums {
+		for i := range proofs {
 			assert.True(t, sums[0].Equal(&sums[i]), "m=%d: ell=%d disagrees on the sum", m, i)
+			require.Len(t, proofs[i].Rounds, m)
+			for r := range proofs[i].Rounds {
+				for j := range numRoundEvals {
+					assert.True(t, proofs[0].Rounds[r][j].Equal(&proofs[i].Rounds[r][j]),
+						"m=%d: ell=%d differs from ell=0 at round %d, evaluation %d", m, i, r+1, j)
+				}
+			}
 		}
 	}
 }
@@ -130,10 +138,9 @@ func TestSplitInvarianceProducesIdenticalProofs(t *testing.T) {
 // TestRoundMessagesAgreeAcrossPaths is the sharper form of split invariance: it
 // compares the *round messages* themselves, not just the final sum.
 //
-// Because ell is bound into the transcript, two runs with different ell diverge
-// after the first challenge. So this drives roundMessageFromTable and
-// roundMessageFolklore directly, at the same prior challenges, and requires all
-// three evaluations to match.
+// It drives roundMessageFromTable and roundMessageFolklore directly, at the same
+// prior challenges, and requires all three evaluations to match, so a
+// disagreement is reported at the round where it arises.
 func TestRoundMessagesAgreeAcrossPaths(t *testing.T) {
 	for _, m := range []int{2, 3, 4, 6} {
 		f := randomGroupPoly(t, m)
@@ -212,7 +219,7 @@ func TestVerifyRejectsWrongSum(t *testing.T) {
 	var wrong bls12381.G1Affine
 	wrong.Add(&sigma, &g1Aff)
 
-	_, err = VerifyGroupEval(curve, proof, alpha, &wrong, DefaultSplit(m))
+	_, err = VerifyGroupEval(curve, proof, alpha, &wrong)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrSumMismatch)
 }
@@ -233,7 +240,7 @@ func TestVerifyRejectsTamperedRounds(t *testing.T) {
 
 		proof.Rounds[round][0].Add(&proof.Rounds[round][0], &g1Aff)
 
-		_, err = VerifyGroupEval(curve, proof, alpha, &sigma, ell)
+		_, err = VerifyGroupEval(curve, proof, alpha, &sigma)
 		require.Error(t, err, "tampering round %d went undetected", round)
 	}
 }
@@ -268,7 +275,7 @@ func TestVerifyRejectsCompensatingTamper(t *testing.T) {
 	totalAff.FromJacobian(&total)
 	require.True(t, totalAff.Equal(&sigma), "the tamper was not actually compensating")
 
-	_, err = VerifyGroupEval(curve, proof, alpha, &sigma, ell)
+	_, err = VerifyGroupEval(curve, proof, alpha, &sigma)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrRoundCheckFailed)
 }
@@ -284,24 +291,25 @@ func TestVerifyRejectsDroppedRound(t *testing.T) {
 	require.NoError(t, err)
 
 	proof.Rounds = proof.Rounds[:m-1]
-	_, err = VerifyGroupEval(curve, proof, alpha, &sigma, DefaultSplit(m))
+	_, err = VerifyGroupEval(curve, proof, alpha, &sigma)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrRoundCountMismatch)
 }
 
-// TestVerifyRejectsWrongSplit checks that ell is bound into the transcript: a
-// verifier using a different split derives different challenges and rejects.
-func TestVerifyRejectsWrongSplit(t *testing.T) {
+// TestVerifyIsIndependentOfProverSplit checks that the verifier does not depend on
+// the prover's split: a proof made at any ell verifies, and so is the same proof.
+func TestVerifyIsIndependentOfProverSplit(t *testing.T) {
 	curve := testCurve()
-	m := 4
+	m := 5
 	f := randomGroupPoly(t, m)
 	alpha := randomPoint(t, m)
 
-	proof, _, sigma, err := ProveGroupEval(curve, f, alpha, 2)
-	require.NoError(t, err)
-
-	_, err = VerifyGroupEval(curve, proof, alpha, &sigma, 1)
-	require.Error(t, err)
+	for _, ell := range []int{0, 1, 3, m} {
+		proof, _, sigma, err := ProveGroupEval(curve, f, alpha, ell)
+		require.NoError(t, err)
+		_, err = VerifyGroupEval(curve, proof, alpha, &sigma)
+		require.NoError(t, err, "ell=%d", ell)
+	}
 }
 
 // TestVerifyRejectsWrongAlpha checks that alpha is bound into the transcript.
@@ -319,7 +327,7 @@ func TestVerifyRejectsWrongAlpha(t *testing.T) {
 	one := fr.One()
 	other[m-1].Add(&other[m-1], &one)
 
-	_, err = VerifyGroupEval(curve, proof, other, &sigma, DefaultSplit(m))
+	_, err = VerifyGroupEval(curve, proof, other, &sigma)
 	require.Error(t, err)
 }
 
@@ -396,24 +404,20 @@ func TestVerifyGroupEvalValidation(t *testing.T) {
 	require.NoError(t, err)
 
 	t.Run("nil curve", func(t *testing.T) {
-		_, err := VerifyGroupEval(nil, proof, alpha, &sigma, 1)
+		_, err := VerifyGroupEval(nil, proof, alpha, &sigma)
 		assert.ErrorIs(t, err, ErrNilCurve)
 	})
 	t.Run("nil proof", func(t *testing.T) {
-		_, err := VerifyGroupEval(curve, nil, alpha, &sigma, 1)
+		_, err := VerifyGroupEval(curve, nil, alpha, &sigma)
 		assert.ErrorIs(t, err, ErrNilProof)
 	})
 	t.Run("nil sigma", func(t *testing.T) {
-		_, err := VerifyGroupEval(curve, proof, alpha, nil, 1)
+		_, err := VerifyGroupEval(curve, proof, alpha, nil)
 		assert.ErrorIs(t, err, ErrNilElement)
 	})
 	t.Run("empty alpha", func(t *testing.T) {
-		_, err := VerifyGroupEval(curve, proof, nil, &sigma, 1)
+		_, err := VerifyGroupEval(curve, proof, nil, &sigma)
 		assert.ErrorIs(t, err, ErrNumVarsMismatch)
-	})
-	t.Run("bad split", func(t *testing.T) {
-		_, err := VerifyGroupEval(curve, proof, alpha, &sigma, 9)
-		assert.ErrorIs(t, err, ErrInvalidSplit)
 	})
 }
 

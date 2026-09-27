@@ -431,8 +431,8 @@ if err != nil {
 | `EncodeGroupOracle(p, dom)` | `sumcheck.GroupPoly` | `[]bls12381.G1Affine` | the committed oracle for `Gtilde` |
 | `EncodeFieldOracle(p, dom)` | `sumcheck.FieldPoly` | `[]fr.Element` | the public generator polynomial `gtilde`, which the verifier recomputes |
 | `ProveGroupEval(curve, f, alpha, ell)` | `sumcheck.GroupPoly`, point, split | proof, opening, `sigma` | the evaluation claim `f(alpha)` |
-| `VerifyGroupEval(curve, proof, alpha, sigma, ell)` | proof + public data | opening | checking that claim |
-| `DefaultSplit(m)` | `m` | `m/2` | the cost-optimal split point |
+| `VerifyGroupEval(curve, proof, alpha, sigma)` | proof + public data | opening | checking that claim |
+| `DefaultSplit(m)` | `m` | `m/2` | the prover's cost-optimal split point |
 | `NewGenerators(curve, gens)` | `[]bls12381.G1Affine` | `*Generators` | the converted-once generator cache for `Eval` |
 | `Eval` / `VerifyEval` | see [section 12.10](#1210-api) | `*EvalProof` | the field evaluation proof `f(alpha) = sigma` |
 | `EvalGroup` / `VerifyEvalGroup` | see [section 12.10](#1210-api) | `*GroupEvalProof` | the group evaluation proof |
@@ -454,8 +454,8 @@ otherwise); a strictly larger domain is what gives the code a rate below 1.
 
 The group sum-check takes `*mathlib.Curve` because it reuses
 `crypto/rp/csp.Transcript` for Fiat-Shamir, under its own domain separator
-`TitanGroupSumCheck-v1`. It absorbs `m`, `ell` and `alpha` before the first round, so
-a proof cannot be reinterpreted under different public parameters:
+`TitanGroupSumCheck-v2`. It absorbs `m` and `alpha` before the first round, so a proof
+cannot be reinterpreted under different public parameters:
 
 ```go
 proof, opening, sigma, err := titan.ProveGroupEval(curve, f, alpha, titan.DefaultSplit(m))
@@ -463,7 +463,7 @@ if err != nil {
     return errors.Wrap(err, "group sum-check prover failed")
 }
 
-vOpening, err := titan.VerifyGroupEval(curve, proof, alpha, &sigma, titan.DefaultSplit(m))
+vOpening, err := titan.VerifyGroupEval(curve, proof, alpha, &sigma)
 if err != nil {
     return errors.Wrap(err, "group sum-check verification failed")
 }
@@ -472,8 +472,9 @@ if err != nil {
 ```
 
 `sigma` is returned rather than taken as an argument, since it is determined by `f`
-and `alpha`. `ell` is a pure performance knob — the claim proved is the same for every
-value — but it is bound into the transcript, so both sides must agree on it.
+and `alpha`. `ell` is the prover's own performance knob: every value produces the same
+proof, so the verifier does not take it and the transcript does not absorb it. (The v1
+transcript absorbed `ell`, which forced the verifier to take it while binding nothing.)
 
 
 ### 8.1 Commitment
@@ -753,9 +754,9 @@ Three tests carry most of the weight:
   two absorb different bytes and draw different challenges.
 - **`TestRoundMessagesAgreeAcrossPaths`** drives `roundMessageFromTable` and
   `roundMessageFolklore` at the same prior challenges and requires all three
-  evaluations to match. Since `ell` is bound into the transcript, two full runs with
-  different `ell` diverge after round 1, so this is the only way to compare the two
-  paths message by message.
+  evaluations to match, which locates a disagreement at the round where it arises.
+  `TestSplitInvarianceProducesIdenticalProofs` checks the same end to end: since `ell`
+  is not in the transcript, full runs at every `ell` must give identical proofs.
 - **`TestFoldFirstSubstitutesFirstVariable`** pins the variable-order convention of
   [section 6.2](#62-variable-order-is-the-opposite-of-cryptosumcheck), which no
   round-trip test can catch.
@@ -970,7 +971,7 @@ Prover and verifier build the statement through **one shared function**
 two sides disagreeing on an encoding.
 
 Leg 2 runs under its own transcript header, `TitanEvalColumnLeg-v1`, distinct from
-leg 1's `TitanGroupSumCheck-v1` and from anything `rp.go` uses. A CSP proof produced
+leg 1's `TitanGroupSumCheck-v2` and from anything `rp.go` uses. A CSP proof produced
 for a range proof therefore cannot be replayed as a Titan column leg, nor a column
 leg as a row leg.
 
@@ -1521,8 +1522,8 @@ A matrix split is checked only by `Split.Validate`: the halves must multiply bac
 `FoldConfig.Validate` rejected odd `m`, and a separate `Split.ValidateForFold` rejected an
 odd row half, on the belief that the coset layout halves the variables exactly. Nothing
 does:
-- the group sum-check splits at `DefaultSplit(m) = ⌊m/2⌋`, a prover cost choice both sides
-  derive identically;
+- the group sum-check's split at `DefaultSplit(m) = ⌊m/2⌋` is the prover's bookkeeping,
+  which the verifier never sees;
 - the coset oracle needs only `1 ≤ Ell ≤ m`;
 - the field path puts `⌊m/2⌋` variables on the column (CSP) leg and `⌈m/2⌉` on the folded
   row leg, whatever their parity.

@@ -92,7 +92,7 @@ func BenchmarkVerifyGroupEval(b *testing.B) {
 		b.Fatal(err)
 	}
 	for b.Loop() {
-		if _, err := VerifyGroupEval(curve, proof, alpha, &sigma, DefaultSplit(m)); err != nil {
+		if _, err := VerifyGroupEval(curve, proof, alpha, &sigma); err != nil {
 			b.Fatal(err)
 		}
 	}

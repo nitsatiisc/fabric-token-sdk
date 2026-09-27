@@ -302,7 +302,7 @@ func (h *FieldOpeningHint) Eval(curve *mathlib.Curve, gens *Generators, alpha []
 	// is not computed separately here -- deriving it twice would let the two
 	// derivations disagree silently.
 	rowEll := DefaultSplit(len(alphaRow))
-	rowTr := newGroupSumCheckTranscript(curve, len(alphaRow), rowEll, alphaRow)
+	rowTr := newGroupSumCheckTranscript(curve, len(alphaRow), alphaRow)
 
 	rowProof, rowOpening, sigmaPartial, err := ProveGroupEvalWithTranscript(rowTr, curve, h.G, alphaRow, rowEll)
 	if err != nil {
@@ -391,10 +391,9 @@ func VerifyEval(curve *mathlib.Curve, c *Commitment, gens *Generators, alpha []f
 	alphaCol, alphaRow := splitAlphaAt(alpha, commitmentSplit(c, m))
 
 	// Leg 1: the row sum-check, asserting the sum is SigmaPartial.
-	rowEll := DefaultSplit(len(alphaRow))
-	rowTr := newGroupSumCheckTranscript(curve, len(alphaRow), rowEll, alphaRow)
+	rowTr := newGroupSumCheckTranscript(curve, len(alphaRow), alphaRow)
 
-	opening, err := VerifyGroupEvalWithTranscript(rowTr, curve, proof.RowProof, alphaRow, &proof.SigmaPartial, rowEll)
+	opening, err := VerifyGroupEvalWithTranscript(rowTr, curve, proof.RowProof, alphaRow, &proof.SigmaPartial)
 	if err != nil {
 		return nil, errors.Wrap(err, "the row leg does not verify")
 	}
@@ -440,7 +439,7 @@ func (h *GroupOpeningHint) EvalGroup(curve *mathlib.Curve, alpha []fr.Element) (
 	// One transcript for both phases. The fold challenges and query indices then
 	// depend on every sum-check message, so a prover cannot pick its polynomial
 	// after seeing which cosets will be opened.
-	tr := newGroupSumCheckTranscript(curve, len(alpha), ell, alpha)
+	tr := newGroupSumCheckTranscript(curve, len(alpha), alpha)
 
 	proof, opening, sigma, err := ProveGroupEvalWithTranscript(tr, curve, h.G, alpha, ell)
 	if err != nil {
@@ -485,10 +484,9 @@ func VerifyEvalGroup(curve *mathlib.Curve, c *Commitment, alpha []fr.Element, si
 		return nil, errors.Wrapf(ErrNumVarsMismatch, "commitment is over %d variables, alpha has %d coordinates", c.NumVars, len(alpha))
 	}
 
-	ell := DefaultSplit(len(alpha))
-	tr := newGroupSumCheckTranscript(curve, len(alpha), ell, alpha)
+	tr := newGroupSumCheckTranscript(curve, len(alpha), alpha)
 
-	opening, err := VerifyGroupEvalWithTranscript(tr, curve, proof.RowProof, alpha, sigma, ell)
+	opening, err := VerifyGroupEvalWithTranscript(tr, curve, proof.RowProof, alpha, sigma)
 	if err != nil {
 		return nil, errors.Wrap(err, "the group evaluation does not verify")
 	}

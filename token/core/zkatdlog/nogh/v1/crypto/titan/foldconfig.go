@@ -190,8 +190,8 @@ func DefaultFoldConfig(m int) (FoldConfig, error) {
 //     dimension that fits the polynomial. The m - Ell remaining variables are the
 //     reduced polynomial, sent in plain; any split between the two is correct.
 //     Ell <= m/2 is a proof-size heuristic, not a correctness condition, so it is
-//     applied by DefaultEll and not here. m may be odd: the group sum-check splits
-//     at floor(m/2), a prover cost choice both sides derive identically, and the
+//     applied by DefaultEll and not here. m may be odd: the group sum-check's
+//     split at floor(m/2) is prover bookkeeping the verifier never sees, and the
 //     coset oracle needs nothing else.
 //   - LogRate >= 1 and Queries >= 1.
 //   - Queries <= NumCosets(m): the consistency queries are DISTINCT indices into

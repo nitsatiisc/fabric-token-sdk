@@ -74,9 +74,10 @@ queries, and the regime the query count was derived under.
 | `Ell` (coset dimension) | `FoldConfig.Ell` | both |
 | `LogRate`, `Queries`, `Regime` | `FoldConfig` | both |
 
-The group sum-check inside the opening also splits its variables, at `⌊m'/2⌋`. That
-split only affects the prover's cost, both sides derive it themselves, and it is not
-configurable.
+The prover's group sum-check also splits its variables internally, at `⌊m'/2⌋`, to
+decide how it computes the round messages. This is the prover's own bookkeeping: the
+messages are the same for every split, the verifier never sees it, and it is not part
+of the configuration.
 
 ### 2.2 Canonical configuration
 
@@ -371,8 +372,8 @@ caller of the PCS interface will see:
 | `ErrRoundCheckFailed`, `ErrSumMismatch` | a sum-check round is inconsistent |
 | `ErrDomainTooLarge` | the domain exceeds BLS12-381 Fr's two-adicity of `2^32` |
 
-`ErrInvalidSplit` belongs to the group sum-check's internal split, not to either split
-in [§2](#2-configuration-canonical-or-custom). A caller of the PCS does not see it.
+`ErrInvalidSplit` belongs to the prover's internal sum-check split, not to either
+split in [§2](#2-configuration-canonical-or-custom). A caller of the PCS does not see it.
 
 ---
 

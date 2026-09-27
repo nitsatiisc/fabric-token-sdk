@@ -111,7 +111,7 @@ func ProveGroupEval(curve *mathlib.Curve, f sumcheck.GroupPoly, alpha []fr.Eleme
 		return nil, nil, zero, err
 	}
 
-	return ProveGroupEvalWithTranscript(newGroupSumCheckTranscript(curve, m, ell, alpha), curve, f, alpha, ell)
+	return ProveGroupEvalWithTranscript(newGroupSumCheckTranscript(curve, m, alpha), curve, f, alpha, ell)
 }
 
 // ProveGroupEvalWithTranscript is ProveGroupEval against a caller-supplied
@@ -240,7 +240,7 @@ func ProveGroupEvalWithTranscript(tr *csp.Transcript, curve *mathlib.Curve, f su
 // It is written from the paper rather than ported: the reference implementation's
 // verifier is incomplete (its final evaluation is commented out and its round loop
 // runs one round short), so it could not serve as a guide.
-func VerifyGroupEval(curve *mathlib.Curve, proof *GroupSumCheckProof, alpha []fr.Element, sigma *bls12381.G1Affine, ell int) (*GroupSumCheckOpening, error) {
+func VerifyGroupEval(curve *mathlib.Curve, proof *GroupSumCheckProof, alpha []fr.Element, sigma *bls12381.G1Affine) (*GroupSumCheckOpening, error) {
 	if curve == nil {
 		return nil, ErrNilCurve
 	}
@@ -248,11 +248,8 @@ func VerifyGroupEval(curve *mathlib.Curve, proof *GroupSumCheckProof, alpha []fr
 	if m == 0 {
 		return nil, errors.Wrap(ErrNumVarsMismatch, "alpha must have at least one coordinate")
 	}
-	if ell < 0 || ell > m {
-		return nil, errors.Wrapf(ErrInvalidSplit, "ell is %d, must be in [0, %d]", ell, m)
-	}
 
-	return VerifyGroupEvalWithTranscript(newGroupSumCheckTranscript(curve, m, ell, alpha), curve, proof, alpha, sigma, ell)
+	return VerifyGroupEvalWithTranscript(newGroupSumCheckTranscript(curve, m, alpha), curve, proof, alpha, sigma)
 }
 
 // VerifyGroupEvalWithTranscript is VerifyGroupEval against a caller-supplied
@@ -264,7 +261,7 @@ func VerifyGroupEval(curve *mathlib.Curve, proof *GroupSumCheckProof, alpha []fr
 // past every round message and positioned identically to the prover's.
 //
 // tr must be positioned exactly as newGroupSumCheckTranscript leaves it.
-func VerifyGroupEvalWithTranscript(tr *csp.Transcript, curve *mathlib.Curve, proof *GroupSumCheckProof, alpha []fr.Element, sigma *bls12381.G1Affine, ell int) (*GroupSumCheckOpening, error) {
+func VerifyGroupEvalWithTranscript(tr *csp.Transcript, curve *mathlib.Curve, proof *GroupSumCheckProof, alpha []fr.Element, sigma *bls12381.G1Affine) (*GroupSumCheckOpening, error) {
 	if curve == nil {
 		return nil, ErrNilCurve
 	}
@@ -277,9 +274,6 @@ func VerifyGroupEvalWithTranscript(tr *csp.Transcript, curve *mathlib.Curve, pro
 	m := len(alpha)
 	if m == 0 {
 		return nil, errors.Wrap(ErrNumVarsMismatch, "alpha must have at least one coordinate")
-	}
-	if ell < 0 || ell > m {
-		return nil, errors.Wrapf(ErrInvalidSplit, "ell is %d, must be in [0, %d]", ell, m)
 	}
 	if len(proof.Rounds) != m {
 		return nil, errors.Wrapf(ErrRoundCountMismatch, "proof has %d rounds, expected %d", len(proof.Rounds), m)
@@ -688,26 +682,24 @@ func checkGroupEvalParams(length int, isNil bool, alpha []fr.Element, ell int) (
 // It is distinct from crypto/sumcheck's, so a proof for one protocol can never be
 // replayed as a proof for the other even where the two happen to agree on the
 // number of rounds and the message shape.
-const DomainSeparator = "TitanGroupSumCheck-v1"
+const DomainSeparator = "TitanGroupSumCheck-v2"
 
 // newGroupSumCheckTranscript builds a transcript bound to this protocol's domain
-// separator and to the public parameters of the claim: the number of variables, the
-// split point, and the evaluation point alpha.
+// separator and to the public parameters of the claim: the number of variables and
+// the evaluation point alpha.
 //
-// ell is bound even though it is only a performance knob, because the two sides
-// must agree on it to agree on the challenges, and because binding it is free.
+// The prover's split point ell is NOT bound. It only decides how the prover
+// computes the round messages, which are identical for every ell, so the verifier
+// neither knows nor needs it. (v1 of this transcript absorbed ell, which forced the
+// verifier to take it as a parameter while binding nothing.)
 //
-// m and ell are absorbed as 32-bit big-endian rather than as single bytes: a byte
-// each would alias (m, ell) pairs 256 apart, and while nothing in this package
-// reaches m = 256 today, a transcript that silently collides on its public
-// parameters is the kind of latent break that is much cheaper to prevent than to
-// find.
-func newGroupSumCheckTranscript(curve *mathlib.Curve, m, ell int, alpha []fr.Element) *csp.Transcript {
+// m is absorbed as 32-bit big-endian rather than a single byte, so that sizes 256
+// apart cannot alias.
+func newGroupSumCheckTranscript(curve *mathlib.Curve, m int, alpha []fr.Element) *csp.Transcript {
 	tr := &csp.Transcript{Curve: curve}
 	tr.InitHasherWithDomain(DomainSeparator)
-	var params [8]byte
-	binary.BigEndian.PutUint32(params[0:4], uint32(m))
-	binary.BigEndian.PutUint32(params[4:8], uint32(ell))
+	var params [4]byte
+	binary.BigEndian.PutUint32(params[:], uint32(m))
 	tr.Absorb(params[:])
 	for i := range alpha {
 		b := alpha[i].Bytes()
