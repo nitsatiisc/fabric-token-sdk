@@ -194,11 +194,6 @@ func DefaultFoldConfig(m int) (FoldConfig, error) {
 //     split at floor(m/2) is prover bookkeeping the verifier never sees, and the
 //     coset oracle needs nothing else.
 //   - LogRate >= 1 and Queries >= 1.
-//   - Queries <= NumCosets(m): the consistency queries are DISTINCT indices into
-//     the folded domain. This binds only at the smallest sizes -- the default 43
-//     queries need 2^(m-Ell+LogRate) >= 43 -- but it is checked here rather than
-//     left to sampleQueryIndices, which would report it from deep inside proveFold
-//     as a transcript failure long after the configuration could be changed.
 //   - A known soundness regime.
 //
 // TestGroupPCSOddNumVars and TestCustomFoldConfigEllAboveHalf pin that the sizes
@@ -216,11 +211,6 @@ func (c FoldConfig) Validate(m int) error {
 	}
 	if c.Queries <= 0 {
 		return errors.Wrapf(ErrInvalidFoldConfig, "query count must be positive, got %d", c.Queries)
-	}
-	if n := c.NumCosets(m); c.Queries > n {
-		return errors.Wrapf(ErrInvalidFoldConfig,
-			"%d distinct queries cannot be drawn from the %d cosets of a %d-variable "+
-				"polynomial at ell=%d, rate 2^-%d", c.Queries, n, m, c.Ell, c.LogRate)
 	}
 	if c.Regime != Capacity && c.Regime != Johnson {
 		return errors.Wrapf(ErrInvalidFoldConfig, "unknown soundness regime %d", int(c.Regime))

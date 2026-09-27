@@ -95,7 +95,7 @@ The package then chooses:
 | split 1 | balanced, `M1 = m/2`, so `m' = m/2` | — (`m' = m`) |
 | split 2 | `Ell = DefaultEll(m', 43)` | `Ell = DefaultEll(m', 43)` |
 | soundness | `ρ = 1/8`, 43 queries, `Capacity` (128 bits) | same |
-| accepted sizes | `m ≡ 0 (mod 4)`, `m ≥ 8` | `m` even, `m ≥ 4` |
+| accepted sizes | `m ≡ 0 (mod 4)` | `m` even |
 
 `DefaultEll` picks the `Ell ≤ m'/2` that minimises proof size, see [§2.5](#25-choosing-a-custom-configuration).
 
@@ -121,12 +121,13 @@ A custom configuration is checked for **correctness only**:
 | split 1 (`Split.Validate`) | `m ≥ 1` and `1 ≤ M1 ≤ m − 1`; any parity, any balance | `ErrInvalidMatrixSplit` |
 | split 2 (`FoldConfig.Validate(m')`) | `1 ≤ Ell ≤ m'`; any parity, including `Ell > m'/2` | `ErrInvalidFoldConfig` |
 | rate, queries | `LogRate ≥ 1`, `Queries ≥ 1` | `ErrInvalidFoldConfig` |
-| drawability | `Queries ≤ 2^(m' − Ell + LogRate)`, since the queries are distinct cosets | `ErrInvalidFoldConfig` |
 | regime | `Capacity` or `Johnson` | `ErrInvalidFoldConfig` |
 | generators (field) | `len(gens) ≥ 2^M1` | `ErrInsufficientGenerators` |
 
-Nothing else is enforced. At the default rate and 43 queries, drawability means
-`m' − Ell ≥ 3`, so `m' ≥ 4`. A custom configuration uses the same code path as the canonical one, and
+Nothing else is enforced. In particular, `Queries` may exceed the number of cosets
+`2^(m' − Ell + LogRate)`. The queries are independent draws, the prover opens each
+distinct one once, and many draws over a small oracle open most or all of it, which is
+at least as sound. A custom configuration uses the same code path as the canonical one, and
 `odd_test.go` shows that odd sizes and `Ell > m'/2` are complete and reject forgeries.
 
 A typical custom configuration keeps the canonical soundness parameters and changes
@@ -189,7 +190,7 @@ The canonical `M1 = m/2` keeps the column half as small as a balanced split allo
 because this package does not fold the CSP leg, so every column variable costs a
 linear amount. The Rust reference folds that leg and so uses `m/2 − 2`.
 
-**Split 2** trades the two parts of the proof. The proof carries `Queries` cosets of
+**Split 2** trades the two parts of the proof. The proof carries up to `Queries` cosets of
 `2^Ell` points plus `2^(m' − Ell)` reduced coefficients, so its size is roughly
 `Queries·2^Ell + 2^(m' − Ell)`. `DefaultEll(m', Queries)` minimises this over
 `1 ≤ Ell ≤ m'/2`. Because of the `Queries` factor, the optimum is well below `m'/2`:
@@ -266,7 +267,7 @@ import (
     "github.com/hyperledger-labs/fabric-smart-client/pkg/utils/errors"
 )
 
-const m = 8 // canonical: m divisible by 4, m >= 8
+const m = 8 // canonical: m divisible by 4
 
 setup, err := titan.NewFieldSetup(m, gens, nil, titan.FoldConfig{})
 if err != nil {
@@ -321,8 +322,8 @@ func (v *GroupVerifier) Verify(proof *GroupEvalProof, sigma *bls12381.G1Affine) 
 func (v *GroupVerifier) VerifyErr(proof *GroupEvalProof, sigma *bls12381.G1Affine) error
 ```
 
-The canonical configuration takes even `m ≥ 4`. A custom `FoldConfig` takes any `m`
-with `m − Ell ≥ 3` at the default rate and query count ([§2](#2-configuration-canonical-or-custom)).
+The canonical configuration takes even `m`. A custom `FoldConfig` takes any `m ≥ 1`
+([§2](#2-configuration-canonical-or-custom)).
 
 ---
 
@@ -364,7 +365,7 @@ caller of the PCS interface will see:
 | `ErrInvalidFoldConfig` | the canonical configuration was asked for a size it does not cover, or a custom `FoldConfig` failed a check in [§2.3](#23-custom-configuration) |
 | `ErrInsufficientGenerators` | fewer than `2^M1` Pedersen generators |
 | `ErrNumVarsMismatch` | `Alpha`, the polynomial and the setup disagree on the variable count |
-| `ErrQueryCountMismatch` | the proof does not carry the configured number of queries |
+| `ErrQueryCountMismatch` | the proof does not carry exactly one opening per distinct sampled index |
 | `ErrCosetOpeningInvalid` | **a consistency query failed**: the coset is not under the root, or does not fold to the reduced polynomial. This is the error that catches a prover who committed to one polynomial and folded another |
 | `ErrReducedClaimMismatch` | the folding is consistent but opens to the wrong value |
 | `ErrReducedPolyMismatch` | the reduced polynomial has the wrong length |
@@ -386,7 +387,7 @@ Deliberate omissions, each with a reason:
   there is no wire encoding yet.
 - **No batch opening.** One point per proof (`ProveAt` can open one commitment at
   several points, one proof each).
-- **No zero-knowledge.** The proof reveals `Queries` cosets of the oracle and the
+- **No zero-knowledge.** The proof reveals up to `Queries` cosets of the oracle and the
   reduced polynomial in plain. Titan is a commitment scheme here, not a ZK argument.
 - **Not WHIR proper.** The reduced polynomial is sent in plain rather than recursed on,
   so the verifier is `O(2^(m−Ell))` rather than polylogarithmic.

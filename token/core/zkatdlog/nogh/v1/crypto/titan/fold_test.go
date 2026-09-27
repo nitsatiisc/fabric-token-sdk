@@ -634,16 +634,8 @@ func TestEvalGroupRejectsAReducedQueryCount(t *testing.T) {
 // variable per row bit. Getting this wrong is a shape error the validation catches,
 // but it is worth stating because m is the number that is in scope at the call.
 //
-// # Only m divisible by 4, and at least 8, is usable on the field path
-//
-// rowVars = m - m/2, so an even rowVars needs m divisible by 4: m=6 gives rowVars=3
-// and DefaultFoldConfig rejects it. This is the even-m assumption composed with the
-// matrix split, not a limitation of the folding itself.
-//
-// m=4 is excluded for a second, independent reason: rowVars=2 gives a folded domain
-// of 16 cosets, and the default 43 queries cannot be drawn distinctly from it. So the
-// field path's smallest usable size is m=8. Both boundaries are pinned by
-// TestFieldFoldRequiresMDivisibleByFour.
+// The fixture uses the canonical fold configuration of the row half, so m must be
+// divisible by 4; TestFieldFoldDefaultConfigBySize pins that boundary.
 func newFieldFoldFixture(t *testing.T, m, queries int) (*evalFixture, FoldConfig) {
 	t.Helper()
 
@@ -777,77 +769,95 @@ func TestEvalWithoutCosetsRejectsAFoldProof(t *testing.T) {
 	require.ErrorIs(t, err, ErrNilProof)
 }
 
-// TestFieldFoldDefaultConfigBySize pins which field sizes fold at the default
-// configuration, and why the others do not -- two different reasons, kept
-// distinguishable so a change to one cannot pass for a change to the other.
+// TestFieldFoldDefaultConfigBySize pins which field sizes the canonical fold
+// configuration covers: those whose row half, rowVars = ceil(m/2), is even, i.e.
+// m divisible by 4. The others fold with a custom configuration.
 //
-// CANONICAL: the folding phase runs on the tier-1 group polynomial, which has
-// rowVars = ceil(m/2) variables, and the canonical configuration is defined for an
-// even count. m=2, 6, 10 give odd row halves; they fold with a custom configuration.
-//
-// DRAWABILITY: the Q consistency queries are distinct indices into the folded domain,
-// which holds 2^(rowVars-Ell+LogRate) cosets. m=4 and m=6 give rowVars 2 and 3 and at
-// most 32 cosets, which cannot supply the default 43 queries. This is a property of
-// the DEFAULT query count rather than of the construction -- the subtest below shows
-// m=4 working at Q=16.
-//
-// Neither is a property of the construction: an earlier version of this test (then
-// named TestFieldFoldRequiresMDivisibleByFour) presented the parity rule as one.
+// There is no size floor: m=4 has a row half of 2 and only 16 cosets, fewer than
+// the 43 queries, and that is fine -- the queries are independent draws, and the
+// prover opens each distinct one. TestFoldWithMoreQueriesThanCosets runs it.
 func TestFieldFoldDefaultConfigBySize(t *testing.T) {
 	t.Parallel()
 
-	const (
-		ok           = "ok"
-		notCanonical = "odd row half: outside the canonical configuration"
-		drawability  = "too few cosets for the default queries"
-	)
-
 	for _, tc := range []struct {
-		m      int
-		reason string
+		m         int
+		canonical bool
 	}{
-		{2, notCanonical}, // rowVars=1
-		{4, drawability},  // rowVars=2
-		{6, notCanonical}, // rowVars=3
-		{8, ok},
-		{10, notCanonical}, // rowVars=5: folds with a custom configuration, see below
-		{12, ok},
+		{2, false}, // rowVars=1
+		{4, true},  // rowVars=2
+		{6, false}, // rowVars=3
+		{8, true},
+		{10, false}, // rowVars=5
+		{12, true},
 	} {
 		rowVars := tc.m - tc.m/2
-		cfg, err := DefaultFoldConfig(rowVars)
-
-		if tc.reason == ok {
-			require.NoError(t, err, "m=%d (rowVars=%d) should be foldable", tc.m, rowVars)
-			require.GreaterOrEqual(t, cfg.NumCosets(rowVars), cfg.Queries, "m=%d", tc.m)
-
+		_, err := DefaultFoldConfig(rowVars)
+		if tc.canonical {
+			require.NoError(t, err, "m=%d (rowVars=%d) is canonical", tc.m, rowVars)
 			continue
 		}
+		require.ErrorIs(t, err, ErrInvalidFoldConfig, "m=%d (rowVars=%d)", tc.m, rowVars)
+		require.Contains(t, err.Error(), "canonical", "m=%d was rejected, but not as a non-canonical size", tc.m)
 
-		require.ErrorIs(t, err, ErrInvalidFoldConfig,
-			"m=%d (rowVars=%d) should be rejected: %s", tc.m, rowVars, tc.reason)
-
-		// Naming the reason is the point: both paths return ErrInvalidFoldConfig, so
-		// asserting the sentinel alone would not notice the two swapping over.
-		if tc.reason == notCanonical {
-			require.Contains(t, err.Error(), "canonical",
-				"m=%d was rejected, but not as a non-canonical size", tc.m)
-		} else {
-			require.Contains(t, err.Error(), "distinct queries",
-				"m=%d was rejected, but not for the drawability reason this table records", tc.m)
-		}
+		custom := FoldConfig{Ell: DefaultEll(rowVars, 43), LogRate: 3, Queries: 43, Regime: Capacity}
+		require.NoError(t, custom.Validate(rowVars), "m=%d (rowVars=%d) folds with a custom configuration", tc.m, rowVars)
 	}
+}
 
-	// m=4 is excluded by the default query count, not by the construction. With a
-	// query count the domain can supply, rowVars=2 configures fine -- which is what
-	// makes the exclusion a parameter choice rather than a shape error.
-	small := FoldConfig{Ell: 1, LogRate: 3, Queries: 16, Regime: Capacity}
-	require.NoError(t, small.Validate(2),
-		"m=4 (rowVars=2) should fold at a query count its 16 cosets can supply")
+// TestFoldWithMoreQueriesThanCosets runs the smallest sizes, where the 43 default
+// queries exceed the number of cosets: a group polynomial in 2 variables (16
+// cosets) and a field polynomial in 4 (row half of 2, 16 cosets). The honest proof
+// verifies with one opening per distinct index, and forgeries are still rejected.
+func TestFoldWithMoreQueriesThanCosets(t *testing.T) {
+	t.Parallel()
+	curve := testCurve()
+	_, _, g1, _ := bls12381.Generators()
 
-	// Likewise an odd row half is outside the canonical configuration, not the
-	// construction: m=10's row half of 5 folds at the default rate and queries.
-	custom := FoldConfig{Ell: DefaultEll(5, 43), LogRate: 3, Queries: 43, Regime: Capacity}
-	require.NoError(t, custom.Validate(5), "m=10 (rowVars=5) should fold with a custom configuration")
+	t.Run("group m=2", func(t *testing.T) {
+		t.Parallel()
+		setup, err := NewGroupSetup(2, curve, FoldConfig{})
+		require.NoError(t, err)
+		require.Greater(t, setup.FoldConfig().Queries, setup.FoldConfig().NumCosets(2))
+
+		st := GroupStatement{Alpha: randomPoint(t, 2)}
+		p, err := NewGroupProver(setup, st, GroupWitness{Poly: randomGroupPoly(t, 2)})
+		require.NoError(t, err)
+		proof, sigma, err := p.Prove()
+		require.NoError(t, err)
+		require.Less(t, len(proof.Fold.Queries), setup.FoldConfig().Queries, "duplicates must be opened once")
+
+		v, err := NewGroupVerifier(setup, st, p.Commitment())
+		require.NoError(t, err)
+		require.NoError(t, v.VerifyErr(proof, &sigma))
+
+		var wrong bls12381.G1Affine
+		wrong.Add(&sigma, &g1)
+		require.Error(t, v.VerifyErr(proof, &wrong), "a wrong value must be rejected")
+
+		dup := *proof.Fold
+		dup.Queries = append(append([]*CosetOpening{}, proof.Fold.Queries...), proof.Fold.Queries[0])
+		forged := *proof
+		forged.Fold = &dup
+		require.ErrorIs(t, v.VerifyErr(&forged, &sigma), ErrQueryCountMismatch, "a repeated opening must be rejected")
+	})
+
+	t.Run("field m=4", func(t *testing.T) {
+		t.Parallel()
+		setup, st, w := newFieldPCS(t, 4)
+		p, err := NewFieldProver(setup, st, w)
+		require.NoError(t, err)
+		proof, sigma, err := p.Prove()
+		require.NoError(t, err)
+
+		v, err := NewFieldVerifier(setup, st, p.Commitment())
+		require.NoError(t, err)
+		require.NoError(t, v.VerifyErr(proof, sigma))
+
+		var wrong fr.Element
+		wrong.SetOne()
+		wrong.Add(&wrong, &sigma)
+		require.Error(t, v.VerifyErr(proof, wrong), "a wrong value must be rejected")
+	})
 }
 
 // TestFoldChecksEveryQueryNotJustTheFirst pins that the verifier checks all Q

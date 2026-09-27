@@ -51,28 +51,45 @@ func TestSampleQueryIndicesDependsOnTheTranscript(t *testing.T) {
 	require.NotEqual(t, a, b)
 }
 
-// TestSampleQueryIndicesAreDistinctAndInRange checks the two properties the
-// soundness argument needs: Q *distinct* indices, each a valid leaf. A repeat
-// would test nothing new and silently lower the security level.
-func TestSampleQueryIndicesAreDistinctAndInRange(t *testing.T) {
+// TestSampleQueryIndicesAreInRangeAndDeduplicated checks what the verifier relies
+// on: every index is a valid leaf, and each distinct index appears once, so every
+// sampled coset is opened exactly once. The count is at most q and at most n.
+func TestSampleQueryIndicesAreInRangeAndDeduplicated(t *testing.T) {
 	t.Parallel()
 
 	for _, tc := range []struct{ n, q int }{
-		{2, 1}, {2, 2}, {16, 8}, {16, 16}, {256, 43}, {1024, 100},
+		{2, 1}, {2, 2}, {2, 43}, {16, 8}, {16, 16}, {16, 43}, {256, 43}, {1024, 100},
 	} {
 		got, err := sampleQueryIndices(queryTranscript(t, "q"), tc.n, tc.q)
 		require.NoError(t, err)
-		require.Len(t, got, tc.q, "n=%d q=%d", tc.n, tc.q)
+		require.NotEmpty(t, got)
+		require.LessOrEqual(t, len(got), min(tc.n, tc.q), "n=%d q=%d", tc.n, tc.q)
 
 		seen := make(map[int]struct{}, len(got))
 		for _, idx := range got {
 			require.GreaterOrEqual(t, idx, 0)
 			require.Less(t, idx, tc.n)
 			_, dup := seen[idx]
-			require.False(t, dup, "index %d drawn twice (n=%d q=%d)", idx, tc.n, tc.q)
+			require.False(t, dup, "index %d returned twice (n=%d q=%d)", idx, tc.n, tc.q)
 			seen[idx] = struct{}{}
 		}
 	}
+}
+
+// TestSampleQueryIndicesAreIndependentDraws pins that the q draws are independent:
+// the distinct indices are exactly the first appearances among q squeezes, so a
+// larger q extends a smaller one's list rather than reshuffling it, and there are
+// no redraws. Both sides depend on this to derive the same list.
+func TestSampleQueryIndicesAreIndependentDraws(t *testing.T) {
+	t.Parallel()
+
+	const n = 16
+	short, err := sampleQueryIndices(queryTranscript(t, "prefix"), n, 10)
+	require.NoError(t, err)
+	long, err := sampleQueryIndices(queryTranscript(t, "prefix"), n, 40)
+	require.NoError(t, err)
+
+	require.Equal(t, short, long[:len(short)], "the first 10 draws must give the same distinct indices")
 }
 
 // TestSampleQueryIndicesCoversTheDomain sanity-checks that the draws are spread
@@ -96,21 +113,15 @@ func TestSampleQueryIndicesCoversTheDomain(t *testing.T) {
 	require.Greater(t, high, q/4, "draws look confined to the low half: %d of %d", high, q)
 }
 
-// TestSampleQueryIndicesExhaustsTheDomain pins the q == n case: the only way to
-// return n distinct indices below n is every index, so this also checks the
-// duplicate rejection does not livelock at the hardest point.
-func TestSampleQueryIndicesExhaustsTheDomain(t *testing.T) {
+// TestSampleQueryIndicesCanExceedTheDomain pins that q > n is allowed: many draws
+// over a small domain cover most or all of it, which is at least as sound.
+func TestSampleQueryIndicesCanExceedTheDomain(t *testing.T) {
 	t.Parallel()
 
-	const n = 64
-	got, err := sampleQueryIndices(queryTranscript(t, "all"), n, n)
+	const n = 8
+	got, err := sampleQueryIndices(queryTranscript(t, "all"), n, 256)
 	require.NoError(t, err)
-
-	seen := make(map[int]struct{}, n)
-	for _, idx := range got {
-		seen[idx] = struct{}{}
-	}
-	require.Len(t, seen, n)
+	require.Len(t, got, n, "256 independent draws over 8 leaves should hit every leaf")
 }
 
 // TestSampleQueryIndicesValidation covers the argument guards.
@@ -132,7 +143,6 @@ func TestSampleQueryIndicesValidation(t *testing.T) {
 		{"domain not a power of two", 12, 1},
 		{"zero queries", 16, 0},
 		{"negative queries", 16, -1},
-		{"more queries than leaves", 16, 17},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()

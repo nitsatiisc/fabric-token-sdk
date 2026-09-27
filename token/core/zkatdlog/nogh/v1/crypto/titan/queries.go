@@ -14,7 +14,8 @@ import (
 	"github.com/LFDT-Panurus/panurus/token/core/zkatdlog/nogh/v1/crypto/rp/csp"
 )
 
-// sampleQueryIndices draws q distinct indices in [0, n) from the transcript.
+// sampleQueryIndices draws q independent indices in [0, n) from the transcript
+// and returns the distinct ones, in order of first appearance.
 //
 // The indices must be unpredictable to the prover before it has committed to the
 // folding rounds, which is what makes the consistency queries bind: a prover who
@@ -22,12 +23,15 @@ import (
 // are therefore squeezed from the same transcript the folding rounds were absorbed
 // into, after the last of them.
 //
-// # Distinctness
+// # Independent draws, duplicates opened once
 //
-// Duplicates are rejected and redrawn rather than accepted. q duplicate-free
-// queries are what the soundness count assumes; accepting a repeat would silently
-// lower the security level, since the second copy tests nothing new. MerkleProof's
-// documentation calls for distinct indices too, and ProveBatch does not enforce it.
+// The soundness bound is for q INDEPENDENT uniform queries: a prover whose oracle
+// disagrees with the reduced polynomial on a delta fraction of cosets escapes all of
+// them with probability at most (1 - delta)^q. That event depends only on the set
+// of cosets hit, so a repeated index adds nothing and is opened once. Nothing
+// requires q <= n either: when q approaches or exceeds n the draws simply cover
+// most or all of the oracle, which is at least as sound. So the result may hold
+// fewer than q indices, and prover and verifier derive the same list.
 //
 // # Why bytes are taken from the squeezed scalar rather than its residue
 //
@@ -36,9 +40,6 @@ import (
 // is a mask and introduces no modulo bias. The function nevertheless rejects a
 // non-power-of-two n rather than silently biasing, because a future caller with an
 // arbitrary n would otherwise get a subtly skewed sample.
-//
-// Drawing q distinct values from n slots needs more than q squeezes when collisions
-// occur; the loop is bounded so a pathological transcript cannot hang it.
 func sampleQueryIndices(tr *csp.Transcript, n, q int) ([]int, error) {
 	if tr == nil {
 		return nil, errors.New("cannot sample query indices without a transcript")
@@ -52,24 +53,12 @@ func sampleQueryIndices(tr *csp.Transcript, n, q int) ([]int, error) {
 	if q <= 0 {
 		return nil, errors.Wrapf(ErrInvalidFoldConfig, "query count must be positive, got %d", q)
 	}
-	if q > n {
-		return nil, errors.Wrapf(ErrInvalidFoldConfig, "cannot draw %d distinct indices from %d", q, n)
-	}
 
 	mask := uint64(n - 1)
 	seen := make(map[int]struct{}, q)
-	out := make([]int, 0, q)
+	out := make([]int, 0, min(q, n))
 
-	// Each squeeze yields one candidate. The bound is generous: drawing q <= n
-	// distinct values needs about n*ln(n/(n-q)) draws in expectation, and 64*q + 64
-	// exceeds that by a wide margin for every (n, q) this package uses.
-	maxDraws := 64*q + 64
-	for draws := 0; len(out) < q; draws++ {
-		if draws >= maxDraws {
-			return nil, errors.Wrapf(ErrInvalidFoldConfig,
-				"could not draw %d distinct indices from %d in %d attempts", q, n, maxDraws)
-		}
-
+	for range q {
 		z, err := tr.Squeeze()
 		if err != nil {
 			return nil, errors.Wrap(err, "failed to squeeze a query index")

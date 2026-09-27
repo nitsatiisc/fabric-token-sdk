@@ -58,15 +58,12 @@ func newGroupPCS(t *testing.T, m int) (*GroupSetup, GroupStatement, GroupWitness
 // TestFieldPCSRoundTrip is the API in the shape callers will use it, across the
 // variable counts the field path supports.
 //
-// m runs over multiples of 4 from 8 up. Two independent constraints produce that
-// range: folding attaches to leg 1, which runs over rowVars = m - m/2 and must be
-// even (so m divisible by 4), and the default 43 queries must be drawable from the
-// folded domain's 2^(rowVars-Ell+LogRate) cosets (so rowVars >= 4, i.e. m >= 8). See
-// fieldRowVars and TestFieldPCSRejectsUnsupportedNumVars.
+// m runs over multiples of 4, the sizes the canonical setup covers; see
+// TestFieldPCSRejectsUnsupportedNumVars.
 func TestFieldPCSRoundTrip(t *testing.T) {
 	t.Parallel()
 
-	for _, m := range []int{8, 12, 16} {
+	for _, m := range []int{4, 8, 12, 16} {
 		setup, st, w := newFieldPCS(t, m)
 
 		p, err := NewFieldProver(setup, st, w)
@@ -416,12 +413,8 @@ func TestPCSRejectsWrongArity(t *testing.T) {
 // constraints at the API boundary, and that they are the canonical choice's rather
 // than the scheme's.
 //
-// Two different reasons, asserted separately so neither can pass for the other:
-//
-//   - m=6, 10: not divisible by 4, so the balanced split does not give two equal
-//     even halves. The canonical setup is defined for those sizes only.
-//   - m=4: divisible by 4, but its 2-variable row half has too few cosets to draw
-//     the default 43 queries from.
+// m=6 and m=10 are not divisible by 4, so the balanced split does not give two
+// equal even halves, and the canonical setup is defined for those sizes only.
 //
 // Both are properties of the canonical configuration: with a custom FoldConfig,
 // m=10 is served by the same balanced split (see also
@@ -444,21 +437,9 @@ func TestFieldPCSRejectsUnsupportedNumVars(t *testing.T) {
 		require.NoError(t, err, "m=%d must work with a custom configuration", m)
 	}
 
-	// Even row half, but too few cosets to draw the default queries from: rejected as
-	// a configuration.
-	{
-		const m = 4
-		_, numCols := matrixShape(m)
-		_, err := NewFieldSetup(m, testGenerators(t, numCols), testCurve(), FoldConfig{})
-		require.ErrorIs(t, err, ErrInvalidFoldConfig,
-			"m=4 has a valid split but cannot supply the default query count")
-		require.NotErrorIs(t, err, ErrInvalidMatrixSplit,
-			"m=4's split is legal; blaming the split would point at the wrong parameter")
-	}
-
-	// The group path folds all m variables rather than the row half, so it needs only
-	// m even -- and its domain is sized by m, so m=4 has 64 cosets and is fine.
-	for _, m := range []int{4, 6, 10} {
+	// The group path folds all m variables rather than the row half, so its
+	// canonical setup needs only m even.
+	for _, m := range []int{2, 4, 6, 10} {
 		_, err := NewGroupSetup(m, testCurve(), FoldConfig{})
 		require.NoError(t, err, "m=%d is valid for the group path", m)
 	}

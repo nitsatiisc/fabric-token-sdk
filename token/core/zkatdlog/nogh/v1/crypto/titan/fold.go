@@ -231,11 +231,6 @@ func verifyFold(
 		return errors.Wrapf(ErrReducedPolyMismatch,
 			"reduced polynomial has %d coefficients, expected %d", len(proof.Reduced), 1<<(m-cfg.Ell))
 	}
-	if len(proof.Queries) != cfg.Queries {
-		return errors.Wrapf(ErrQueryCountMismatch,
-			"proof carries %d queries, configuration requires %d", len(proof.Queries), cfg.Queries)
-	}
-
 	folded, err := NewDomain(c.LogDomain)
 	if err != nil {
 		return errors.WithMessage(err, "failed to rebuild the folded domain")
@@ -302,12 +297,18 @@ func verifyFold(
 	if err != nil {
 		return errors.WithMessage(err, "failed to sample consistency queries")
 	}
+	// One opening per distinct sampled index. Fewer would leave cosets the
+	// transcript chose unchecked, which is what would lower soundness.
+	if len(proof.Queries) != len(indices) {
+		return errors.Wrapf(ErrQueryCountMismatch,
+			"proof carries %d queries, the transcript requires %d", len(proof.Queries), len(indices))
+	}
 
 	// The structural checks stay per query: they are cheap next to the group
 	// operations, and each one can name the query that failed. Only the two MSMs
 	// are batched, below.
 	cosetSize := cfg.CosetSize()
-	leaves := make([]bls12381.G1Affine, 0, cfg.Queries*cosetSize)
+	leaves := make([]bls12381.G1Affine, 0, len(indices)*cosetSize)
 
 	for i, idx := range indices {
 		q := proof.Queries[i]
@@ -359,7 +360,7 @@ func verifyFold(
 		return errors.WithMessage(err, "failed to squeeze the batching challenge")
 	}
 
-	// gamma^0 .. gamma^(Q-1), computed once and used on BOTH sides. Deriving them
+	// gamma^0 .. gamma^(len(indices)-1), computed once and used on BOTH sides. Deriving them
 	// twice would be two places for the two sides to drift apart.
 	//
 	// The WEIGHTING is also defence in depth here, which is worth recording because
@@ -376,9 +377,9 @@ func verifyFold(
 	// future change that breaks it. TestFoldReducedIsAbsorbedBeforeQueriesAreSampled
 	// fails if the absorb is ever moved after sampleQueryIndices, which is exactly
 	// when the weighting would stop being redundant.
-	gammaPow := make([]fr.Element, cfg.Queries)
+	gammaPow := make([]fr.Element, len(indices))
 	gammaPow[0].SetOne()
-	for i := 1; i < cfg.Queries; i++ {
+	for i := 1; i < len(indices); i++ {
 		gammaPow[i].Mul(&gammaPow[i-1], &gamma)
 	}
 

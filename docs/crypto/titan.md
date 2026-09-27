@@ -733,8 +733,8 @@ so the Go verifier must be written from the paper rather than ported.
 | `eval_bench_test.go` | `Eval` and `VerifyEval` at `m ∈ {8,10,12,14}`; `EvalGroup` at `m ∈ {8,10,12}`; the mathlib boundary for generators and scalars at `n ∈ {16,64,128,256}`; cached vs uncached across prove/verify |
 | `domain_test.go` | `g_(d-1) = g_d^2` and `L_d.Elements[i]^2 = L_(d-1).Elements[i mod 2^(d-1)]` for `d ∈ 2..18` — the unstated gnark-crypto dependency all cross-round index arithmetic rests on; `Squared()` against a freshly built domain |
 | `coset_test.go` | the coset **definition** against an independent `EvaluatePoint` (6 configs); `⟨leaf, eq(r)⟩` equals the reduced codeword; two negatives pinning that the coset oracle is **not** a regrouping or a strided read of the flat codeword; `CommitCosets` round-trip and binding; validation |
-| `foldconfig_test.go` | `Q(λ=128, ρ=1/8) = 43` under capacity and 86 under Johnson; the `DefaultEll` size model; `Validate` over `ell ∈ [1, m/2]`, odd `m`, bad rate and bad query count; the **drawability floor** — `Queries ≤ NumCosets(m)`, so `DefaultFoldConfig(2)` is rejected and `m = 4` is the smallest default-configurable size (13.10) |
-| `queries_test.go` | determinism; dependence on the transcript; distinctness and range including `n=256, q=43`; domain coverage; exhaustion at `q = n`; validation (nil transcript, non-power-of-two `n`, `q > n`) |
+| `foldconfig_test.go` | `Q(λ=128, ρ=1/8) = 43` under capacity and 86 under Johnson; the `DefaultEll` size model; `Validate` over `Ell ∈ [1, m]`, odd `m`, bad rate and bad query count; the canonical configuration rejecting only odd and non-positive `m`, with no size floor (13.10) |
+| `queries_test.go` | determinism; dependence on the transcript; range and deduplication including `q > n`; independent draws (a longer draw extends a shorter one); domain coverage; full coverage at `q ≫ n`; validation (nil transcript, non-power-of-two `n`, non-positive `q`) |
 | `fold_test.go` | round-trip for `m ∈ {4,6,8,10}` × `ell ∈ 1..m/2`; the reduced polynomial against `foldFirstField` applied `ell` times; **a lying prover** whose fold runs over another polynomial; **a foreign fold with genuine openings** (the test that check 3 is load-bearing, with `verifyFoldRoundsOnly` asserting checks 1–2 pass); every query position corrupted in turn, including the last; 11 soundness negatives (tampered leaf/path, wrong index, swapped and permuted queries, tampered/replaced/truncated reduced poly, tampered and dropped round, dropped query); wrong claim; wrong `alpha`; short coset; end-to-end `Eval`/`EvalGroup` with folding at `m ∈ {8,12}` incl. anti-downgrade in both directions and the prover-chosen query count; the field path's size constraints under the balanced split (a folding round must fit, and the default queries must be drawable, so `m ≥ 7`; parity is not a constraint, see 13.10), asserting on the *reason* for each rejection since both return `ErrInvalidFoldConfig`; the batched check 3 (per-query failures, per-query sensitivity of the combined equation, and the absorb-before-sample ordering that makes the combination sound without relying on `gamma` — see 13.7); validation |
 | `fold_bench_test.go` | proof size in **real serialized bytes** vs `ell ∈ 1..6` at `m = 12`; prove and verify at `m ∈ {8,10,12}`, the measurement behind the 10× batching speedup in 13.6 |
 | `pcs_test.go` | the facade (13.12): round trip at `m ∈ {8,12,16}` (field) and `{4,6,8,10}` (group); the **two guarantees** — a prover always folds, a verifier refuses an unfolded commitment; wrong value, wrong point, and a foreign proof rejected on both paths; `Verify` vs `VerifyErr` separating misuse from rejection; arity errors incl. `Alpha` sized from the row half; the field path's size constraints at the API boundary, each asserting the sentinel of the check that actually fires (`ErrInvalidMatrixSplit` for an odd row half, `ErrInvalidFoldConfig` for drawability) rather than one sentinel for both; setup validation and nil receivers; the **domain-sizing rule** on both paths, which no functional test can see; **asymmetric splits** at `m ∈ {10,14,18}` — sizes the balanced path rejects outright — with `sigma` checked against `FieldPoly.EvaluatePoint` since a round trip alone cannot see a mis-cut split (13.13) |
@@ -1508,7 +1508,6 @@ canonical, not a property of the construction.
 - `m ≥ 1` and `1 ≤ Ell ≤ m`, so the coset dimension fits and `m − Ell` variables remain
   for the reduced polynomial;
 - `LogRate ≥ 1` and `Queries ≥ 1`;
-- the queries are drawable, `Queries ≤ NumCosets(m)`;
 - the soundness regime is known.
 
 A matrix split is checked only by `Split.Validate`: the halves must multiply back to
@@ -1540,25 +1539,25 @@ sum-check round, fold round, reduced polynomial and partial evaluation:
 The pivot protocol had been padding its group witness to satisfy the parity rule, which
 cost up to 2× in prover time at odd `log K`.
 
-**Drawability.** The `Q` consistency queries are *distinct* indices into the folded
-domain, which holds `2^(rowVars − ℓ + logRate)` cosets. At m = 4, `rowVars = 2` gives 16
-cosets, and the default `Q = 43` cannot be drawn from them. So the smallest usable
-field-path size is **m = 8**, not m = 4.
+**No drawability floor.** An earlier version also required `Queries ≤ NumCosets(m)`, on
+the belief that the `Q` consistency queries must be *distinct* cosets, which put the
+smallest canonical field size at m = 8 and rejected `DefaultFoldConfig(2)`. That
+requirement was not needed for soundness. The bound is for `Q` **independent** uniform
+queries: a prover whose oracle disagrees on a `δ` fraction of cosets escapes all of them
+with probability at most `(1 − δ)^Q`, and that event depends only on the set of cosets
+hit. So `sampleQueryIndices` makes `Q` independent draws and returns the distinct
+indices in order of first appearance. The prover opens each once, and the verifier
+derives the same list and requires exactly one opening per entry. When `Q` approaches or
+exceeds the number of cosets, the draws cover most or all of the oracle, which is at
+least as sound.
 
-The second constraint was found by the PCS facade (section 13.12) and is a real defect
-it exposed, not a limitation of the facade: `DefaultFoldConfig(2)` was returning
-`Queries = 43` happily, and the failure surfaced from inside `proveFold` as
-"cannot draw 43 distinct indices from 16" — *after* the commitment had been built and the
-folding rounds absorbed into the transcript. `FoldConfig.Validate` now checks
-`Queries ≤ NumCosets(m)`, so the configuration is rejected where it is chosen rather than
-where it is used. m = 2 is the only even count affected on the group path, since that path
-sizes its domain by `m` itself and already has 64 cosets at m = 4.
+A consequence is that the number of openings, and so the proof size, varies slightly
+from proof to proof: collisions among the `Q` draws save an opening each.
 
-The boundaries are pinned by `TestFieldFoldDefaultConfigBySize`, which asserts on
-the *reason* for each rejection rather than only on the sentinel — both return
-`ErrInvalidFoldConfig`, so a test checking the sentinel alone would not notice the two
-swapping over. `TestDefaultFoldConfigHasAFloor` pins the m = 2 boundary and that the
-check is on drawability rather than on `m`: at `Q = 16`, `rowVars = 2` configures fine.
+`TestFieldFoldDefaultConfigBySize` pins the canonical sizes, and
+`TestFoldWithMoreQueriesThanCosets` runs group m = 2 and field m = 4, where the 43
+queries exceed the 16 cosets. The honest proof verifies, and a wrong value and a
+repeated opening are rejected.
 
 ### 13.11 API
 
@@ -1777,7 +1776,7 @@ prover re-deriving the split instead of using the committed one; the verifier di
 `alpha` at the balanced cut; `checkShape` ignoring `ColVars`; the commitment omitting
 `ColVars`; and the facade dropping the setup's split when committing.
 
-**Not yet done.** `DefaultEll` and the drawability floor are still computed against
+**Not yet done.** `DefaultEll` is still computed against
 `RowVars` without regard to how the split was chosen (13.10), and no benchmark has
 established whether `m/2` is optimal for *our* cost model. It will not match Rust's
 `m/2 − 2`: that reference also folds the generator oracle (its `l2`), which keeps a

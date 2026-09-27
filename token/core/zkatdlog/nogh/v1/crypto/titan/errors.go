@@ -137,10 +137,10 @@ var (
 	// ran the folding over another.
 	ErrCosetOpeningInvalid = errors.New("coset consistency query failed")
 
-	// ErrQueryCountMismatch indicates that a fold proof does not carry the number
-	// of consistency queries the configuration requires. Accepting fewer would
-	// lower the soundness of the proof below its stated level.
-	ErrQueryCountMismatch = errors.New("fold proof query count does not match configuration")
+	// ErrQueryCountMismatch indicates that a fold proof does not carry exactly one
+	// opening per distinct index the transcript sampled. Accepting fewer would leave
+	// sampled cosets unchecked and lower soundness below its stated level.
+	ErrQueryCountMismatch = errors.New("fold proof query count does not match the sampled indices")
 
 	// ErrPointAtInfinity indicates that the point at infinity was supplied where
 	// a non-identity point is required. Crossing into mathlib for the CSP linear

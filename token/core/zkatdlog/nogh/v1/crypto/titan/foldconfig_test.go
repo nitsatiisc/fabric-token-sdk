@@ -111,15 +111,12 @@ func TestDefaultEllIsSizeOptimal(t *testing.T) {
 // TestDefaultFoldConfig checks the recommended configuration at every size it is
 // defined for.
 //
-// m starts at 4, not 2. At m=2 the folded domain holds 2^(2-1+3) = 16 cosets and the
-// default 43 queries cannot be drawn distinctly from it, so DefaultFoldConfig
-// reports an error rather than returning a configuration that fails at prove time;
-// TestDefaultFoldConfigHasAFloor pins that boundary. m=2 is the only even count
-// affected -- m=4 already has 64 cosets.
+// It is defined for every even m >= 2; TestDefaultFoldConfigIsCanonicalOnly pins
+// the rejections.
 func TestDefaultFoldConfig(t *testing.T) {
 	t.Parallel()
 
-	for m := 4; m <= 20; m += 2 {
+	for m := 2; m <= 20; m += 2 {
 		cfg, err := DefaultFoldConfig(m)
 		require.NoError(t, err)
 		require.NoError(t, cfg.Validate(m))
@@ -130,31 +127,24 @@ func TestDefaultFoldConfig(t *testing.T) {
 	}
 }
 
-// TestDefaultFoldConfigHasAFloor pins the smallest polynomial the recommended
-// configuration is defined for, and that the failure is reported at configuration
-// time rather than deep inside proveFold.
+// TestDefaultFoldConfigIsCanonicalOnly pins what the canonical configuration
+// rejects: odd and non-positive m, with an error pointing to the custom route.
 //
-// The constraint is that the Q consistency queries are DISTINCT indices into the
-// folded domain, so Q <= 2^(m-Ell+LogRate). Nothing else in the package notices: the
-// commit step builds the oracle happily, and it is sampleQueryIndices -- called after
-// the folding rounds have already been absorbed -- that would otherwise fail.
-func TestDefaultFoldConfigHasAFloor(t *testing.T) {
+// It no longer has a size floor. An earlier version rejected m=2 because its 16
+// cosets could not supply 43 DISTINCT queries; the queries are independent draws,
+// and more queries than cosets simply opens most or all of the oracle.
+func TestDefaultFoldConfigIsCanonicalOnly(t *testing.T) {
 	t.Parallel()
 
-	_, err := DefaultFoldConfig(2)
-	require.ErrorIs(t, err, ErrInvalidFoldConfig,
-		"m=2 has only 16 cosets and cannot supply 43 distinct queries")
+	for _, m := range []int{-2, 0, 1, 3, 7} {
+		_, err := DefaultFoldConfig(m)
+		require.ErrorIs(t, err, ErrInvalidFoldConfig, "m=%d", m)
+		require.Contains(t, err.Error(), "custom FoldConfig", "m=%d", m)
+	}
 
-	_, err = DefaultFoldConfig(4)
-	require.NoError(t, err, "m=4 has 64 cosets, which is enough")
-
-	// The check is on drawability, not on m: a smaller query count is fine at m=2.
-	small := FoldConfig{Ell: 1, LogRate: 3, Queries: 16, Regime: Capacity}
-	require.NoError(t, small.Validate(2))
-
-	small.Queries = 17
-	require.ErrorIs(t, small.Validate(2), ErrInvalidFoldConfig,
-		"17 distinct queries cannot come from 16 cosets")
+	cfg, err := DefaultFoldConfig(2)
+	require.NoError(t, err)
+	require.Greater(t, cfg.Queries, cfg.NumCosets(2), "m=2 has fewer cosets than queries, and that is fine")
 }
 
 func TestFoldConfigValidate(t *testing.T) {
@@ -190,10 +180,11 @@ func TestFoldConfigValidate(t *testing.T) {
 		half.Ell = 6 // m/2, where the canonical choice stops
 		require.NoError(t, half.Validate(12))
 
-		// Above m/2 is correct; the only limit is that the queries stay drawable,
-		// which at Ell = 9 leaves 2^(12-9+3) = 64 cosets for 43 queries.
+		// Above m/2 is correct, up to Ell = m.
 		above := good
 		above.Ell = 9
+		require.NoError(t, above.Validate(12))
+		above.Ell = 12
 		require.NoError(t, above.Validate(12))
 
 		tooLow := good
