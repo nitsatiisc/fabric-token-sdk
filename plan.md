@@ -1051,3 +1051,23 @@ against itself.
   still reserved and `commitGroup` is a two-line change.
 - `make lint` still cannot run here (`golangci-lint` absent) and must not be claimed as
   passing.
+
+### Follow-up: independent query sampling ✅ COMPLETE
+
+Goal: drop the drawability requirement (`Queries <= NumCosets`), which soundness does not need.
+
+1. Sample Q independent query indices, open each distinct one once.
+2. Verifier requires one opening per distinct sampled index.
+3. Remove the check from `FoldConfig.Validate`; update tests and docs.
+4. Re-benchmark and refresh `pivot-utxo.md` and the paper.
+
+## Implementation Progress
+- [x] `sampleQueryIndices` makes Q independent draws and deduplicates; `verifyFold` checks
+  the count against the deduplicated list.
+- [x] `FoldConfig.Validate` no longer checks drawability; the canonical configuration has no
+  size floor. `TestFoldWithMoreQueriesThanCosets` added.
+- [x] Re-benchmarked: aggregated proof 49.4 / 66.2 / 83.6 / 98.4 KB at K = 8 / 32 / 64 / 128;
+  prover 1.9-3.0x faster than naive. pivot-utxo.md and the paper updated.
+
+## Notes & Decisions
+- Proof size now varies slightly per proof: each collision among the Q draws saves an opening.

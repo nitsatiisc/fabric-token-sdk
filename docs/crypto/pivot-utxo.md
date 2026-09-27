@@ -158,24 +158,26 @@ Measured on an Intel i9-14900HX (32 threads), 2 iterations:
 
 | K | Prove: naive / aggregated | Verify: naive / aggregated | Proof bytes: naive / aggregated |
 |---|---|---|---|
-| 8 | 887 ms / 476 ms | 179 ms / 60 ms | 75.7 K / 51.4 K |
-| 32 | 3.61 s / 1.49 s | 526 ms / 67 ms | 303 K / 67 K |
-| 64 | 6.78 s / 2.91 s | 1.22 s / 84 ms | 605 K / 84 K |
-| 128 | 14.11 s / 5.06 s | 2.37 s / 93 ms | 1.21 M / 99 K |
+| 8 | 906 ms / 487 ms | 158 ms / 66 ms | 75.7 K / 49.4 K |
+| 32 | 3.80 s / 1.45 s | 603 ms / 61 ms | 303 K / 66 K |
+| 64 | 7.29 s / 2.97 s | 1.20 s / 86 ms | 605 K / 84 K |
+| 128 | 14.50 s / 4.90 s | 2.56 s / 100 ms | 1.21 M / 98 K |
 
 At K = 2 (no longer in the benchmark's K list) the aggregated proof was 46 K against
 19 K, so the size crossover lies between K = 2 and K = 8.
 
-- **Proving** is faster than K naive senders at every measured K, by 1.9–2.8×. Nearly
+- **Proving** is faster than K naive senders at every measured K, by 1.9–3.0×. Nearly
   all of the naive cost is per-transfer proving, while most of the aggregated cost is
   one group commitment over the private slots.
-- **Verification** is nearly flat in K: 25× faster at K = 128.
-- **Proof size** grows with log K, about 16 K per doubling: 12× smaller at K = 128. At small K the two Titan
-  openings dominate.
+- **Verification** is nearly flat in K: 26× faster at K = 128.
+- **Proof size** grows with log K, 15–17 K per doubling from K = 32: 12× smaller at
+  K = 128. At small K the two Titan openings dominate. It varies slightly between
+  proofs, since each Titan opening draws its 43 queries independently and a collision
+  saves an opening.
 - **No parity padding:** the 9 private slots pad to 16 at every K. An earlier version
   padded to 32 at odd `log K` because Titan was believed to need an even variable count,
   which it does not (see [Titan](titan.md) §13.10). Dropping that took K = 128 from
-  7.9 s to 5.1 s.
+  7.9 s to about 5 s.
 - **What the columns cover:** the naive verify figure includes the validator's
   deserialization and the auditor signature check. The naive prove figure excludes
   auditing.
