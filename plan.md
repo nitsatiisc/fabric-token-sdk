@@ -43,6 +43,26 @@ as the naive transfers, and benchmark it against K naive transfers in `validator
   (c = 16/32).
 - [x] Re-benchmarked: K = 64 prover 2.92 s (2.4x faster than naive), verify 77 ms, 84 KB.
 
+### Follow-up: odd variable counts in Titan
+
+- [x] Titan's group and field commitments accept any variable count: `FoldConfig.Validate` no
+  longer requires even m (Ell <= floor(m/2)); `Split.ValidateForFold` no longer requires an even
+  row half. Odd-size soundness tests added (`odd_test.go`); the seven tests that encoded the
+  parity rule updated to the new rule. pivot drops its parity check; utxo pads to c = 16 at
+  every K.
+- [x] Re-benchmarked (K = 8, 32, 64, 128): prover 1.9-2.8x faster than naive; K = 128 5.06 s.
+
+### Follow-up: canonical vs custom Titan configurations
+
+- [x] `DefaultFoldConfig` is the strict canonical configuration (even m); `NewFieldSetup` with a
+  zero config is canonical (m divisible by 4), `NewGroupSetup` with a zero config needs even m.
+- [x] `FoldConfig.Validate` checks correctness only: 1 <= Ell <= m, drawable queries, positive
+  rate and queries, known regime. The Ell <= m/2 cap moved to `DefaultEll`.
+- [x] `Split.ValidateForFold` removed; `Split.Validate` is the only split contract.
+- [x] Tests: canonical rejections with reasons; odd sizes, odd row halves and Ell > m/2 through
+  custom configs, each rejecting forgeries (`odd_test.go`).
+- [x] pivot keeps zero = canonical; utxo passes explicit custom configs.
+
 ## Notes & Decisions
 
 - The pivot parameters are generated from an explicit list of the 16 group equations, not

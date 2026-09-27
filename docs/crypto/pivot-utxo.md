@@ -62,9 +62,10 @@ The aggregated proof consumes exactly what the K naive transfers consume.
   as a naive owner signature also publishes it.
 
 The field commitment's Pedersen generators are derived by hashing to the curve, so the
-setup is transparent. `NewSetup(params, K)` pads the 9 private group slots to `c = 16` or `32` so that
-the group commitment's variable count is even. It also chooses the field
-commitment's matrix split so that its row half is even. K may be any power of two ≥ 2.
+setup is transparent. `NewSetup(params, K)` pads the 9 private group slots to `c = 16`
+and uses the balanced field split. Both commitments get custom fold configurations, with
+the canonical rate and query count and the size-optimal coset dimension, because their
+variable counts take either parity as K varies. K may be any power of two ≥ 2.
 
 ## 4. The Relation
 
@@ -157,24 +158,24 @@ Measured on an Intel i9-14900HX (32 threads), 2 iterations:
 
 | K | Prove: naive / aggregated | Verify: naive / aggregated | Proof bytes: naive / aggregated |
 |---|---|---|---|
-| 8 | 935 ms / 656 ms | 136 ms / 53 ms | 75.7 K / 56.3 K |
-| 32 | 3.01 s / 2.39 s | 391 ms / 67 ms | 303 K / 80 K |
-| 64 | 6.86 s / 2.86 s | 1.27 s / 65 ms | 605 K / 84 K |
-| 128 | 14.09 s / 7.90 s | 2.27 s / 95 ms | 1.21 M / 113 K |
+| 8 | 887 ms / 476 ms | 179 ms / 60 ms | 75.7 K / 51.4 K |
+| 32 | 3.61 s / 1.49 s | 526 ms / 67 ms | 303 K / 67 K |
+| 64 | 6.78 s / 2.91 s | 1.22 s / 84 ms | 605 K / 84 K |
+| 128 | 14.11 s / 5.06 s | 2.37 s / 93 ms | 1.21 M / 99 K |
 
 At K = 2 (no longer in the benchmark's K list) the aggregated proof was 46 K against
 19 K, so the size crossover lies between K = 2 and K = 8.
 
-- **Proving** is faster than K naive senders at every measured K: 2.4× at K = 64 and
-  1.8× at K = 128. Nearly
+- **Proving** is faster than K naive senders at every measured K, by 1.9–2.8×. Nearly
   all of the naive cost is per-transfer proving, while most of the aggregated cost is
   one group commitment over the private slots.
-- **Verification** is nearly flat in K: 24× faster at K = 128.
-- **Proof size** grows with log K: 10.7× smaller at K = 128. At small K the two Titan
+- **Verification** is nearly flat in K: 25× faster at K = 128.
+- **Proof size** grows with log K, about 16 K per doubling: 12× smaller at K = 128. At small K the two Titan
   openings dominate.
-- **Parity:** the group commitment needs `log c + log K` even, so odd `log K` pads
-  the 9 private slots to 32 rather than 16. That is why K = 32 and K = 128 gain less
-  than K = 64.
+- **No parity padding:** the 9 private slots pad to 16 at every K. An earlier version
+  padded to 32 at odd `log K` because Titan was believed to need an even variable count,
+  which it does not (see [Titan](titan.md) §13.10). Dropping that took K = 128 from
+  7.9 s to 5.1 s.
 - **What the columns cover:** the naive verify figure includes the validator's
   deserialization and the auditor signature check. The naive prove figure excludes
   auditing.
@@ -217,7 +218,7 @@ go test ./token/core/zkatdlog/nogh/v1/validator -run '^$' -bench BenchmarkAggreg
 
 - **Honest instances:** each of the 16 group equations and the field constraint
   holds on a laid-out transfer.
-- **Round trips** at K = 2 (`c = 32`) and K = 4 (`c = 16`).
+- **Round trips** at K = 2 and K = 4.
 - **One bad transfer among K** is rejected in each of these cases:
   - a wrong output opening (group equations);
   - a flipped range bit (field constraint only);

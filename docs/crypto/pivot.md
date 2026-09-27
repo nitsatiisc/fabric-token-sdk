@@ -185,9 +185,11 @@ challenges build `alpha`, `B`, `Gamma`, `G0` and `Phi`.
 `TestRelationFromPostCommitmentChallenge` exercises this.
 
 `SetupOptions` carries the field commitment's matrix split and both fold
-configurations. The balanced default split only folds when `log n + log K` is a
-multiple of four. Other sizes need an explicit `FieldSplit`, e.g. `{M: 6, M1: 2}`.
-The group commitment needs `log c + log K` even, which `NewSetup` checks.
+configurations. Left zero, they take Titan's canonical configuration, which is strict:
+the field row half and `log c + log K` must be even. Any other sizes work with custom
+configurations, which Titan checks for correctness only (see [Titan](titan.md) §13.10).
+The [UTXO instantiation](pivot-utxo.md) passes custom configurations, because its
+sizes take either parity as K varies.
 
 Errors wrapping `ErrMalformedProof` mean the proof is structurally wrong. Errors
 wrapping `ErrVerificationFailed`, or a sum-check or PCS error, mean it is well formed

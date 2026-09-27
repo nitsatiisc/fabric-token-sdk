@@ -37,33 +37,32 @@ func (s Sizes) L() int { return 1 << s.LogL }
 // K returns the number of instances.
 func (s Sizes) K() int { return 1 << s.LogK }
 
-// validate rejects sizes the protocol cannot run at.
-//
-// Every dimension needs at least one variable, since each is the variable set of
-// some sum-check. The group commitment covers log c + log K variables and the group
-// PCS requires that to be even; stating it here turns a confusing setup error into
-// a parameter-selection one.
+// validate rejects sizes the protocol cannot run at: every dimension needs at least
+// one variable, since each is the variable set of some sum-check. The commitments
+// themselves accept any variable count large enough for their fold configuration,
+// which NewSetup checks.
 func (s Sizes) validate() error {
 	if s.LogN < 1 || s.LogC < 1 || s.LogL < 1 || s.LogK < 1 {
 		return errors.Wrapf(ErrInvalidSizes, "every dimension needs at least one variable, got %+v", s)
-	}
-	if (s.LogC+s.LogK)%2 != 0 {
-		return errors.Wrapf(ErrInvalidSizes,
-			"log c + log K must be even for the group commitment, got %d + %d", s.LogC, s.LogK)
 	}
 
 	return nil
 }
 
-// SetupOptions are the commitment parameters a caller may override. The zero value
-// takes the Titan defaults.
+// SetupOptions are the commitment parameters a caller may override.
+//
+// The zero value takes Titan's CANONICAL configuration, which is strict about sizes:
+// the field commitment's row half and the group commitment's variable count must be
+// even. For any other sizes pass custom fold configurations, which Titan checks for
+// correctness only: any split between rows and columns, any variable count, and any
+// coset dimension up to the variable count.
 type SetupOptions struct {
 	// FieldSplit is the matrix split of the field commitment over log n + log K
-	// variables. Nil takes titan.DefaultMatrixSplit, which only folds when that
-	// count is a multiple of four; other counts need an explicit split.
+	// variables. Nil takes titan.DefaultMatrixSplit, floor/ceil halves.
 	FieldSplit *titan.Split
-	// FieldFold and GroupFold are the folding configurations; the zero value takes
-	// the Titan default for the size.
+	// FieldFold is the folding configuration of the field commitment's row half, and
+	// GroupFold that of the group commitment. The zero value takes the canonical
+	// titan.DefaultFoldConfig.
 	FieldFold titan.FoldConfig
 	GroupFold titan.FoldConfig
 }

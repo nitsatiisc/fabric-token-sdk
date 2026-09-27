@@ -507,8 +507,14 @@ func TestTablePointOrder(t *testing.T) {
 
 func TestSetupValidation(t *testing.T) {
 	gens := testGenerators(16)
-	_, err := NewSetup(Sizes{LogN: 4, LogC: 1, LogL: 2, LogK: 4}, gens, testCurve(), SetupOptions{})
-	require.ErrorIs(t, err, ErrInvalidSizes, "log c + log K odd")
+	// log c + log K may be odd, with a custom group configuration; the canonical
+	// one is defined for an even count only.
+	odd := Sizes{LogN: 4, LogC: 3, LogL: 2, LogK: 4}
+	_, err := NewSetup(odd, gens, testCurve(), SetupOptions{})
+	require.ErrorIs(t, err, titan.ErrInvalidFoldConfig)
+	groupFold := titan.FoldConfig{Ell: 2, LogRate: titan.DefaultLogRate, Queries: 43, Regime: titan.Capacity}
+	_, err = NewSetup(odd, gens, testCurve(), SetupOptions{GroupFold: groupFold})
+	require.NoError(t, err)
 	_, err = NewSetup(Sizes{LogN: 0, LogC: 2, LogL: 2, LogK: 4}, gens, testCurve(), SetupOptions{})
 	require.ErrorIs(t, err, ErrInvalidSizes)
 	bad := titan.Split{M: 7, M1: 3}

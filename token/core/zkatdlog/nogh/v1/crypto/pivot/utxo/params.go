@@ -151,12 +151,10 @@ type Setup struct {
 
 // NewSetup builds the setup for aggregates of k transfers, k a power of two >= 2.
 //
-// The committed group witness holds only the 9 private slots, padded to c = 16 or
-// 32, whichever makes log c + log K even, as the group commitment requires. The
-// per-transfer public elements are not committed. The field commitment's matrix split is chosen so that
-// its row half is even, which is what the fold phase needs. The field commitment's
-// Pedersen generators are derived by hashing to the curve, so the setup is
-// transparent.
+// The committed group witness holds only the 9 private slots, padded to c = 16. The
+// per-transfer public elements are not committed. The field commitment uses the
+// balanced matrix split, and its Pedersen generators are derived by hashing to the
+// curve, so the setup is transparent.
 func NewSetup(p *Params, k int) (*Setup, error) {
 	if p == nil {
 		return nil, errors.New("params are required")
@@ -165,32 +163,46 @@ func NewSetup(p *Params, k int) (*Setup, error) {
 		return nil, errors.Errorf("the number of transfers must be a power of two >= 2, got %d", k)
 	}
 	logK := bits.Len(uint(k)) - 1
-	logC := 4
-	if (logC+logK)%2 != 0 {
-		logC = 5
-	}
-	sizes := pivot.Sizes{LogN: p.logN, LogC: logC, LogL: 4, LogK: logK}
+	sizes := pivot.Sizes{LogN: p.logN, LogC: 4, LogL: 4, LogK: logK}
 
-	m := p.logN + logK
-	m1 := m / 2
-	if (m-m1)%2 != 0 {
-		m1--
+	// The sizes here are generally not Titan's canonical ones -- the field row half
+	// and the group variable count take either parity as K varies -- so both
+	// commitments get custom configurations: the canonical rate and query count and
+	// the size-optimal coset dimension, which Titan checks for correctness only.
+	split := titan.DefaultMatrixSplit(p.logN + logK)
+	fieldFold, err := foldConfig(split.RowVars())
+	if err != nil {
+		return nil, err
 	}
-	split := titan.Split{M: m, M1: m1}
+	groupFold, err := foldConfig(sizes.LogC + logK)
+	if err != nil {
+		return nil, err
+	}
 	gens := make([]bls12381.G1Affine, split.Cols())
 	for i := range gens {
 		g := p.curve.HashToG1([]byte("lfdt-panurus.pivot-utxo.field-generator." + strconv.Itoa(i)))
-		var err error
 		if gens[i], err = toAffine(g); err != nil {
 			return nil, err
 		}
 	}
-	ps, err := pivot.NewSetup(sizes, gens, p.curve, pivot.SetupOptions{FieldSplit: &split})
+	ps, err := pivot.NewSetup(sizes, gens, p.curve, pivot.SetupOptions{FieldSplit: &split, FieldFold: fieldFold, GroupFold: groupFold})
 	if err != nil {
 		return nil, errors.WithMessagef(err, "failed to build the pivot setup for %d transfers", k)
 	}
 
 	return &Setup{params: p, pivot: ps, logK: logK}, nil
+}
+
+// foldConfig returns the fold configuration for an m-variable commitment: rate 1/8
+// and 128 bits under the capacity bound, as in Titan's canonical configuration, and
+// the size-optimal coset dimension, for any m.
+func foldConfig(m int) (titan.FoldConfig, error) {
+	q, err := titan.QueryCount(titan.DefaultSecurityBits, titan.DefaultLogRate, titan.Capacity)
+	if err != nil {
+		return titan.FoldConfig{}, err
+	}
+
+	return titan.FoldConfig{Ell: titan.DefaultEll(m, q), LogRate: titan.DefaultLogRate, Queries: q, Regime: titan.Capacity}, nil
 }
 
 // K returns the number of transfers the setup aggregates.
